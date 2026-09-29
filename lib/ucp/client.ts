@@ -263,7 +263,20 @@ async function discoverWellKnown(origin: string): Promise<Discovered> {
 
 let rpcId = 1
 
-async function authHeaders(): Promise<Record<string, string>> {
+/**
+ * The Dev Dashboard token is a *Catalog* credential. Observed live
+ * (2026-09-29): sending it to a merchant's Checkout MCP endpoint
+ * (aab-usa-v2.myshopify.com) returns JSON-RPC -32000 "AuthenticationFailed",
+ * while the same calls without it work (ucp-cli never sends one to merchants).
+ * So only the catalog endpoint gets it, unless SHOPIFY_TOKEN_FOR_MERCHANTS=1.
+ */
+export function shouldSendToken(endpoint: string): boolean {
+  if (process.env.SHOPIFY_TOKEN_FOR_MERCHANTS === '1') return true
+  return new URL(endpoint).origin === new URL(config().catalogUrl).origin
+}
+
+async function authHeaders(endpoint: string): Promise<Record<string, string>> {
+  if (!shouldSendToken(endpoint)) return {}
   const token = await getAccessToken()
   return token ? { Authorization: `Bearer ${token}` } : {}
 }
@@ -283,7 +296,7 @@ export async function rpc<T = unknown>(endpoint: string, method: string, params:
         'Content-Type': 'application/json',
         Accept: 'application/json',
         'User-Agent': USER_AGENT,
-        ...(await authHeaders()),
+        ...(await authHeaders(endpoint)),
       },
       body: JSON.stringify({ jsonrpc: '2.0', id, method, params }),
       signal: AbortSignal.timeout(TIMEOUT_MS),

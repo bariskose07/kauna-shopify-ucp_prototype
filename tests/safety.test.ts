@@ -59,3 +59,13 @@ describe('maskPII', () => {
     expect(s).toContain('NY')
   })
 })
+
+describe('token scope', () => {
+  it('sends the Catalog token to the catalog only, never to merchants', async () => {
+    const { shouldSendToken } = await import('../lib/ucp/client')
+    process.env.SHOPIFY_CATALOG_URL = 'https://catalog.shopify.com/api/ucp/mcp'
+    expect(shouldSendToken('https://catalog.shopify.com/api/ucp/mcp')).toBe(true)
+    expect(shouldSendToken('https://aab-usa-v2.myshopify.com/api/ucp/mcp')).toBe(false)
+    delete process.env.SHOPIFY_CATALOG_URL
+  })
+})

@@ -95,6 +95,8 @@ Seçilen yol ve dört adayın şemadaki durumu (`present/absent/unknown`) checko
 ## 8. Canlı gözlemler (kullanıcının makinesinden)
 
 - Token (client credentials) + `SHOPIFY_CATALOG_URL` ile Global Catalog araması yanıt verdi.
+- **Token kapsamı:** Catalog token'ı (`Authorization: Bearer`) mağazanın uç noktasına da gönderildiğinde `aab-usa-v2.myshopify.com` her çağrıda JSON-RPC `-32000 AuthenticationFailed` döndü (arama ve Satın al → sepet). Token artık yalnızca Catalog uç noktasına gidiyor; mağazalara ucp-cli gibi yalnızca agent profili ile gidiliyor. İstenirse `SHOPIFY_TOKEN_FOR_MERCHANTS=1`.
+- Global Catalog, AAB ürününü (`Green Tartan Maxi`, 134 $ USD, `…/54030028341562`, seçenekler: Dress length 52/54 in, Size XXS …) satıcı `aab-usa-v2.myshopify.com` ile ve `eligible.native_checkout: false` olarak döndürdü → escalation beklentisiyle uyumlu.
 - "Satıcı + ürün adı" (us.aabcollection.com): satıcının UCP araması yukarıdaki `idempotency-key` nedeniyle başlangıçta engellendi (düzeltildi). Global Catalog sonuçlarında AAB bulunmadı; `/products.json` yedeği sonuç verdi.
 
 ## 9. Sonraki adımlar (kendi makinenizde)

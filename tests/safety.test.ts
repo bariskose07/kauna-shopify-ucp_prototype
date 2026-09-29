@@ -69,3 +69,24 @@ describe('token scope', () => {
     delete process.env.SHOPIFY_CATALOG_URL
   })
 })
+
+describe('429 circuit breaker', () => {
+  it('stops calling an endpoint until Retry-After has passed', async () => {
+    const { rpc, rateLimitRemaining } = await import('../lib/ucp/client')
+    const ep = 'https://ratelimited.example/api/ucp/mcp'
+    let calls = 0
+    const orig = globalThis.fetch
+    globalThis.fetch = (async () => {
+      calls++
+      return new Response('{}', { status: 429, headers: { 'Retry-After': '3588' } })
+    }) as typeof fetch
+    try {
+      await expect(rpc(ep, 'tools/list', {})).rejects.toMatchObject({ kind: 'rate_limited', retryAfterSeconds: 3588 })
+      await expect(rpc(ep, 'tools/list', {})).rejects.toMatchObject({ kind: 'rate_limited' })
+      expect(calls).toBe(1) // second call never hit the network
+      expect(rateLimitRemaining(ep)).toBeGreaterThan(3500)
+    } finally {
+      globalThis.fetch = orig
+    }
+  })
+})

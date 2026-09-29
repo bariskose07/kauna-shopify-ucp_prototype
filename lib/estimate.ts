@@ -28,6 +28,8 @@ export interface ShippingEstimate {
   destination: string
   messages: { code?: string; content?: string; severity?: string }[]
   notes: string[]
+  /** Cart gave nothing; a checkout-based estimate can be requested explicitly. */
+  checkoutAvailable?: boolean
 }
 
 function destinationOf(b: BuyerInfo) {
@@ -72,7 +74,14 @@ function destFor(schema: Json, path: string, b: BuyerInfo, notes: string[]): Jso
   return out
 }
 
-export async function estimateShipping(s: Session, seller: string, variantId: string, buyer: BuyerInfo): Promise<ShippingEstimate> {
+export async function estimateShipping(
+  s: Session,
+  seller: string,
+  variantId: string,
+  buyer: BuyerInfo,
+  /** Checkout fallback only on an explicit click — Checkout MCP limits are tight (429, ~1 h). */
+  allowCheckout = false,
+): Promise<ShippingEstimate> {
   const where = `${buyer.address_locality}, ${buyer.address_region} ${buyer.postal_code}`
   const notes: string[] = []
 
@@ -116,6 +125,9 @@ export async function estimateShipping(s: Session, seller: string, variantId: st
   }
 
   // ── 2. checkout (authoritative) ─────────────────────────────────────────
+  if (!allowCheckout) {
+    return { source: 'none', choices: [], destination: where, messages: [], notes, checkoutAvailable: true }
+  }
   try {
     const [cs, us] = await Promise.all([getInputSchema(seller, 'create_checkout'), getInputSchema(seller, 'update_checkout')])
     const cf = schemaFacts(cs, 'create')

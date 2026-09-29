@@ -15,6 +15,9 @@ interface ProductResp {
 
 type Sel = { name: string; label: string }[]
 
+// Per-tab memo so revisiting a variant never re-hits the merchant.
+const estimateCache = new Map<string, ShippingEstimate>()
+
 function ProductInner() {
   const q = useSearchParams()
   const router = useRouter()
@@ -80,25 +83,51 @@ function ProductInner() {
   // ── Shipping estimate in the background (no click, no redirect) ─────────
   const [estimate, setEstimate] = useState<ShippingEstimate | null>(null)
   const [estLoading, setEstLoading] = useState(false)
-  useEffect(() => {
-    if (!variant?.id || !sellerUrl || variant.available === false) return
-    let stale = false
-    setEstimate(null)
-    setEstLoading(true)
-    const t = setTimeout(() => {
-      api<ShippingEstimate>('/api/shipping-estimate', { body: { seller: sellerUrl, variantId: variant.id } })
-        .then((r) => !stale && setEstimate(r))
-        .catch((e) =>
-          !stale &&
-          setEstimate({ source: 'none', choices: [], destination: '', messages: [], notes: [e instanceof ApiFailure ? e.error.message : String(e)] }),
+
+  // Automatic: cart-only (cheap). Checkout-based estimates run only on click —
+  // Checkout MCP answered 429 with Retry-After ≈ 3600 s when every PDP view
+  // created a checkout. Results are memoised per seller+variant in memory.
+  const requestEstimate = useCallback(
+    (allowCheckout: boolean) => {
+      if (!variant?.id || !sellerUrl) return () => {}
+      const key = `${sellerUrl}|${variant.id}|${allowCheckout ? 'co' : 'cart'}`
+      const hit = estimateCache.get(key)
+      if (hit) {
+        setEstimate(hit)
+        return () => {}
+      }
+      let stale = false
+      setEstimate(null)
+      setEstLoading(true)
+      api<ShippingEstimate>('/api/shipping-estimate', { body: { seller: sellerUrl, variantId: variant.id, allowCheckout } })
+        .then((r) => {
+          estimateCache.set(key, r)
+          if (!stale) setEstimate(r)
+        })
+        .catch(
+          (e) =>
+            !stale &&
+            setEstimate({ source: 'none', choices: [], destination: '', messages: [], notes: [e instanceof ApiFailure ? e.error.message : String(e)] }),
         )
         .finally(() => !stale && setEstLoading(false))
+      return () => {
+        stale = true
+      }
+    },
+    [variant?.id, sellerUrl],
+  )
+
+  useEffect(() => {
+    if (!variant?.id || !sellerUrl || variant.available === false) return
+    let cancel = () => {}
+    const t = setTimeout(() => {
+      cancel = requestEstimate(false)
     }, 400)
     return () => {
-      stale = true
       clearTimeout(t)
+      cancel()
     }
-  }, [variant?.id, variant?.available, sellerUrl])
+  }, [variant?.id, variant?.available, sellerUrl, requestEstimate])
 
   // ── "Satın al": create the checkout with the saved buyer and open the
   // merchant's pre-filled payment page straight away. The window is opened
@@ -131,8 +160,17 @@ function ProductInner() {
       // Kauna's own summary stays here: totals, messages, status check.
       router.push(`/checkout?seller=${encodeURIComponent(sellerUrl)}`)
     } catch (e) {
-      w?.close()
-      setErr(e instanceof ApiFailure ? `${e.error.message}${e.error.hint ? ` — ${e.error.hint}` : ''}` : String(e))
+      const msg = e instanceof ApiFailure ? `${e.error.message}${e.error.hint ? ` — ${e.error.hint}` : ''}` : String(e)
+      // No UCP checkout (e.g. 429): still get the buyer to the merchant's own
+      // checkout via Catalog's buy-now link — just without pre-filled fields.
+      if (variant.checkoutUrl) {
+        if (w && !w.closed) w.location.href = variant.checkoutUrl
+        else window.open(variant.checkoutUrl, '_blank', 'noopener')
+        setErr(`${msg} → Mağazanın satın alma bağlantısı (checkout_url) açıldı; form önceden doldurulmadı.`)
+      } else {
+        w?.close()
+        setErr(msg)
+      }
       setBusy(false)
     }
   }
@@ -198,6 +236,13 @@ function ProductInner() {
               <>
                 Kargo ödeme adımında hesaplanır.
                 {estimate.notes.length > 0 && <div className="muted">{estimate.notes.join(' · ')}</div>}
+                {estimate.checkoutAvailable && (
+                  <div style={{ marginTop: 6 }}>
+                    <button onClick={() => requestEstimate(true)} disabled={estLoading}>
+                      Kargoyu hesapla (mağaza checkout’u ile)
+                    </button>
+                  </div>
+                )}
               </>
             )}
           </div>

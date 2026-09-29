@@ -286,7 +286,33 @@ async function authHeaders(endpoint: string): Promise<Record<string, string>> {
  * is returned untouched (business messages inside it are NOT errors).
  * HTTP 429 → wait `Retry-After` once when it is short, otherwise surface it.
  */
+// Endpoint → epoch ms until which the business asked us to back off (429).
+// While blocked we do not call it at all: hammering a rate-limited endpoint
+// can only prolong the block. Observed live: Retry-After ≈ 3600 s.
+const blockedUntil: Map<string, number> = ((globalThis as unknown as { __ucpBlocked?: Map<string, number> }).__ucpBlocked ??=
+  new Map())
+
+export function rateLimitRemaining(endpoint: string): number | undefined {
+  const until = blockedUntil.get(endpoint)
+  if (until === undefined) return undefined
+  const left = Math.ceil((until - Date.now()) / 1000)
+  if (left <= 0) {
+    blockedUntil.delete(endpoint)
+    return undefined
+  }
+  return left
+}
+
 export async function rpc<T = unknown>(endpoint: string, method: string, params: unknown, attempt = 0): Promise<T> {
+  const left = rateLimitRemaining(endpoint)
+  if (left !== undefined) {
+    throw new UcpError({
+      kind: 'rate_limited',
+      httpStatus: 429,
+      retryAfterSeconds: left,
+      message: `Hız limiti sürüyor (${Math.ceil(left / 60)} dk kaldı). Süre bitene kadar bu uç noktaya istek gönderilmiyor.`,
+    })
+  }
   const id = rpcId++
   let res: Response
   try {
@@ -313,6 +339,7 @@ export async function rpc<T = unknown>(endpoint: string, method: string, params:
       await new Promise((r) => setTimeout(r, wait * 1000))
       return rpc<T>(endpoint, method, params, attempt + 1)
     }
+    if (wait !== undefined) blockedUntil.set(endpoint, Date.now() + wait * 1000)
     throw new UcpError({
       kind: 'rate_limited',
       httpStatus: 429,

@@ -42,6 +42,8 @@ npm run typecheck
 | `UCP_AGENT_PROFILE_URL` | Hayır | Her istekte `meta["ucp-agent"].profile` olarak giden agent profili. Boşsa mağazanın desteklediği sürüme göre Shopify'ın örnek profili: `https://shopify.dev/ucp/agent-profiles/<sürüm>/valid-with-capabilities.json`. |
 | `UCP_TRANSPORT` | Hayır | `auto` (varsayılan: doğrudan JSON-RPC) veya `cli` (`@shopify/ucp-cli`'ı `child_process` ile çağırır). |
 | `UCP_CLI_BIN` | Hayır | `cli` modunda `ucp` ikilisinin yolu. |
+| `SHOPIFY_CATALOG_URL` | Hayır | Dev Dashboard'daki Catalog MCP uç noktası (ör. `https://catalog.shopify.com/api/ucp/mcp`). Olduğu gibi kullanılır; origin'in `/.well-known/ucp`'si yalnızca UCP sürümü için okunur. |
+| `SHOPIFY_CATALOG_ID` | Hayır | Dev Dashboard katalog kimliği. Global aramada `saved_catalog_slug` olarak gönderilir (şemada listelenmiyor; yanlışsa `not_found` mesajı döner). |
 | `UCP_CATALOG_URL` | Hayır | Global Catalog işletme URL'si (varsayılan `https://catalog.shopify.com`, `/.well-known/ucp` ile keşfedilir). |
 | `DEFAULT_SELLER` | Hayır | Arayüzdeki varsayılan satıcı (varsayılan `https://us.aabcollection.com`). |
 | `UCP_MAX_RETRY_AFTER_SECONDS` | Hayır | 429'da `Retry-After` bu süreden kısaysa bir kez bekleyip tekrar dener; uzunsa hatayı arayüze taşır (varsayılan 5). |

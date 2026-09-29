@@ -33,12 +33,28 @@ const TIMEOUT_MS = 30_000
 const DISCOVERY_TTL_MS = 5 * 60_000
 const TOOLS_TTL_MS = 60_000 // UCP minimum cache for tools/list
 
+function catalogEndpoint(): string | undefined {
+  const raw = process.env.SHOPIFY_CATALOG_URL
+  if (!raw) return undefined
+  try {
+    const u = new URL(raw)
+    return u.pathname && u.pathname !== '/' ? u.toString() : undefined
+  } catch {
+    return undefined
+  }
+}
+
 export function config() {
   return {
     transport: (process.env.UCP_TRANSPORT ?? 'auto') === 'cli' ? ('cli' as const) : ('direct' as const),
     hasClientCredentials: Boolean(process.env.SHOPIFY_CLIENT_ID && process.env.SHOPIFY_CLIENT_SECRET),
     profileOverride: process.env.UCP_AGENT_PROFILE_URL || undefined,
-    catalogUrl: process.env.UCP_CATALOG_URL || 'https://catalog.shopify.com',
+    // SHOPIFY_CATALOG_URL (Dev Dashboard) is the MCP endpoint itself, e.g.
+    // https://catalog.shopify.com/api/ucp/mcp; its origin is the catalog business.
+    catalogUrl: catalogEndpoint() ? new URL(catalogEndpoint() as string).origin : process.env.UCP_CATALOG_URL || 'https://catalog.shopify.com',
+    catalogEndpoint: catalogEndpoint(),
+    /** Dev Dashboard catalog id — sent as `saved_catalog_slug` (see catalog.ts). */
+    catalogId: process.env.SHOPIFY_CATALOG_ID || undefined,
     defaultSeller: process.env.DEFAULT_SELLER || 'https://us.aabcollection.com',
     maxRetryAfter: Number(process.env.UCP_MAX_RETRY_AFTER_SECONDS ?? 5),
   }
@@ -70,7 +86,8 @@ export async function getAccessToken(): Promise<string | undefined> {
       signal: AbortSignal.timeout(TIMEOUT_MS),
     })
   } catch (e) {
-    throw new UcpError({ kind: 'auth', message: `Token isteği başarısız: ${(e as Error).message}` })
+    // Network failure, not bad credentials.
+    throw new UcpError({ kind: 'network', message: `api.shopify.com token isteğine ulaşılamadı: ${(e as Error).message}` })
   }
   const body = (await res.json().catch(() => ({}))) as { access_token?: string; expires_in?: number }
   if (!res.ok || !body.access_token) {
@@ -150,6 +167,38 @@ export async function discover(businessUrl: string, force = false): Promise<Disc
   const hit = discCache.get(origin)
   if (!force && hit && Date.now() - hit.at < DISCOVERY_TTL_MS) return hit.value
 
+  // Explicit catalog endpoint from the Dev Dashboard wins over discovery.
+  // /.well-known/ucp is still read (for the version) when reachable.
+  const { catalogEndpoint: explicit } = config()
+  if (explicit && new URL(explicit).origin === origin) {
+    let base: Discovered | undefined
+    try {
+      base = await discoverWellKnown(origin)
+    } catch {
+      base = undefined
+    }
+    const version = base?.version ?? process.env.UCP_CATALOG_VERSION ?? '2026-04-08'
+    const value: Discovered = {
+      business: origin,
+      version,
+      source: base?.source ?? 'well-known',
+      businessProfileUrl: base?.businessProfileUrl ?? '(SHOPIFY_CATALOG_URL — keşif atlandı)',
+      endpoint: explicit,
+      agentProfileUrl: config().profileOverride ?? SHOPIFY_SAMPLE_PROFILE(version),
+      capabilities: base?.capabilities,
+      paymentHandlers: base?.paymentHandlers,
+      profile: base?.profile ?? {},
+    }
+    discCache.set(origin, { at: Date.now(), value })
+    return value
+  }
+  const value = await discoverWellKnown(origin)
+  discCache.set(origin, { at: Date.now(), value })
+  return value
+}
+
+async function discoverWellKnown(origin: string): Promise<Discovered> {
+
   const wellKnown = `${origin}/.well-known/ucp`
   const top = await getJson(wellKnown)
   if (top.status !== 200 || typeof top.body !== 'object' || top.body === null || !('ucp' in top.body)) {
@@ -207,7 +256,6 @@ export async function discover(businessUrl: string, force = false): Promise<Disc
     paymentHandlers: ucp.payment_handlers,
     profile,
   }
-  discCache.set(origin, { at: Date.now(), value })
   return value
 }
 

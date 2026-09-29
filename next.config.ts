@@ -5,6 +5,8 @@ const nextConfig: NextConfig = {
   // URLs (Catalog terms: no server-side caching/proxying of Catalog media), so
   // next/image optimisation is intentionally NOT used.
   images: { unoptimized: true },
+  // Don't let `next dev` write AGENTS.md / CLAUDE.md into the repo.
+  agentRules: false,
   // Allow opening the dev server from a phone on the same Wi-Fi / via a tunnel.
   allowedDevOrigins: ['*.local', '192.168.*.*', '10.*.*.*', '*.ngrok-free.app', '*.trycloudflare.com'],
 }

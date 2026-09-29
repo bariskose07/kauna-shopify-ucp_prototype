@@ -236,7 +236,13 @@ export interface CatalogResult<T> {
 async function catalogCall(business: string, tool: string, catalogBody: Json) {
   const schema = await getInputSchema(business, tool)
   const { args, dropped } = conformToSchema(schema, { catalog: catalogBody })
-  const res = await callTool<Json>(business, tool, args)
+  // Dev Dashboard catalog id → `saved_catalog_slug` on global search only.
+  // ucp-cli docs: server-supported but NOT listed in the inputSchema, so it is
+  // added after conformance; a wrong value comes back as a `not_found` message.
+  const { catalogId, catalogUrl } = config()
+  const withSlug = tool === 'search_catalog' && catalogId && business === catalogUrl
+  if (withSlug) (args.catalog as Json).saved_catalog_slug = catalogId
+  const res = await callTool<Json>(business, tool, args, { allowUnknownFields: Boolean(withSlug) })
   return { res, dropped }
 }
 

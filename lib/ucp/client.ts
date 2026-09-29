@@ -16,7 +16,7 @@ import { randomUUID } from 'node:crypto'
 
 import { maskPII } from '../mask'
 import { UcpError, parseRetryAfter } from './errors'
-import { validate, type ValidationReport } from './schema'
+import { pathStatus, validate, type ValidationReport } from './schema'
 import type { Json, UcpMeta } from './types'
 
 // ─── safety rail (rule 1) ────────────────────────────────────────────────────
@@ -423,14 +423,15 @@ export async function callTool<T = Json>(
     })
   }
 
-  const wireArgs: Json = {
-    ...args,
-    meta: {
-      ...((args.meta as Json) ?? {}),
-      'ucp-agent': { profile: disc.agentProfileUrl },
-      'idempotency-key': randomUUID(),
-    },
-  }
+  // meta.idempotency-key only when the live schema accepts it. Observed live
+  // (us.aabcollection.com search_catalog): `meta` is a closed object listing
+  // only `ucp-agent`, so an unconditional key (what ucp-cli does) is rejected
+  // by our pre-flight. Mutating tools on Shopify list it; read tools may not.
+  const meta: Json = { ...((args.meta as Json) ?? {}), 'ucp-agent': { profile: disc.agentProfileUrl } }
+  const schema = tool.inputSchema as Json
+  const metaDescribed = pathStatus(schema, 'meta') === 'present'
+  if (!metaDescribed || pathStatus(schema, 'meta.idempotency-key') !== 'absent') meta['idempotency-key'] = randomUUID()
+  const wireArgs: Json = { ...args, meta }
 
   // Rule 4: pre-flight against the live inputSchema.
   const validation = validate(tool.inputSchema, wireArgs)

@@ -90,8 +90,14 @@ Seçilen yol ve dört adayın şemadaki durumu (`present/absent/unknown`) checko
 | Checkout için JWT | CLI README: "Checkout requires a Catalog JWT" | Görevdeki önceki testler hesapsız checkout oluşturabildi |
 | Checkout Kit "uygulama içinde" | Genel tanım: "embeds the purchase flow directly in your application" | Web bileşeni yalnızca popup / yeni sekme (+ örtü) sunuyor, inline yok |
 | Checkout Kit sürümü | — | Yalnızca alfa; `latest` etiketi bile alfa (4.0.0-alpha.1) |
+| `meta.idempotency-key` | ucp-cli her çağrıya ekliyor ("accepting one is harmless") | **Canlı (Mac'ten, 2026-09-29):** `us.aabcollection.com` `search_catalog` şeması `meta`'yı yalnızca `ucp-agent` içeren kapalı bir nesne olarak tanımlıyor; anahtar şemada yok. Ön kontrol yakaladı ve istek gönderilmedi. Artık anahtar yalnızca şema kabul ediyorsa (veya `meta` hiç tanımlı değilse) ekleniyor. |
 
-## 8. Sonraki adımlar (kendi makinenizde)
+## 8. Canlı gözlemler (kullanıcının makinesinden)
+
+- Token (client credentials) + `SHOPIFY_CATALOG_URL` ile Global Catalog araması yanıt verdi.
+- "Satıcı + ürün adı" (us.aabcollection.com): satıcının UCP araması yukarıdaki `idempotency-key` nedeniyle başlangıçta engellendi (düzeltildi). Global Catalog sonuçlarında AAB bulunmadı; `/products.json` yedeği sonuç verdi.
+
+## 9. Sonraki adımlar (kendi makinenizde)
 
 1. `npm run dev` → Hata ayıklama → Mağaza keşfi: `us.aabcollection.com`. `checkoutSchemaFacts.phonePlacement`, `attribution`, `supportsDiscounts` ve `supportsCartId` değerlerini bu dosyaya işleyin.
 2. Senaryoları 1→8 sırasıyla çalıştırın ve "Bulguları kopyala" çıktısını bu dosyaya ekleyin.

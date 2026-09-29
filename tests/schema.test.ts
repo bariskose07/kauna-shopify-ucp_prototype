@@ -40,3 +40,14 @@ describe('live-schema checks', () => {
     expect(r.valid).toBe(false)
   })
 })
+
+describe('meta.idempotency-key', () => {
+  it('is absent when meta is a closed object without it (seen live on AAB search_catalog)', () => {
+    const s = { type: 'object', properties: { meta: { type: 'object', properties: { 'ucp-agent': { type: 'object' } } }, catalog: { type: 'object' } } }
+    expect(pathStatus(s, 'meta.idempotency-key')).toBe('absent')
+    expect(findUnknownFields(s, { meta: { 'ucp-agent': {}, 'idempotency-key': 'x' } }).map((u) => u.pointer)).toEqual(['/meta/idempotency-key'])
+  })
+  it('meta not described at all → client still sends it (protocol-owned, like ucp-cli)', () => {
+    expect(pathStatus({ type: 'object', properties: { catalog: { type: 'object' } } }, 'meta')).toBe('absent')
+  })
+})

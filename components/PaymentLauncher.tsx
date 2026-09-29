@@ -209,7 +209,8 @@ export function PaymentLauncher({ seller, continueUrl, ucpVersion, scenario, onC
     <div className="card">
       <h2 style={{ marginTop: 0 }}>Ödeme sayfası</h2>
       <div className="notice danger small">
-        Mağaza sayfası açılınca alanları ve hızlı ödeme butonlarını incele; <strong>“Siparişi tamamla / Pay now”a basma</strong>.
+        <strong>“Siparişi tamamla / Pay now”a basma.</strong>
+        Mağaza sayfası açılınca yalnızca alanları ve hızlı ödeme butonlarını incele.
       </div>
       <p className="small muted">
         Mod: <strong>{mode === 'A' ? 'A – Checkout Kit (web)' : mode === 'B' ? 'B – Açılır pencere / yeni sekme' : 'C – ECP iframe'}</strong>{' '}

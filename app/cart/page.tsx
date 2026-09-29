@@ -35,14 +35,14 @@ export default function CartPage() {
     }
   }
 
-  if (!carts) return <p className="muted">Yükleniyor…</p>
+  if (!carts) return <div className="skeleton" style={{ height: 160 }} />
   if (carts.length === 0)
     return (
       <>
         <h1>Sepet</h1>
-        <p className="muted">
-          Sepet boş. <Link href="/">Ürün ara</Link>
-        </p>
+        <div className="empty">
+          Sepetin boş. <Link href="/">Ürün keşfet →</Link>
+        </div>
       </>
     )
 
@@ -68,17 +68,17 @@ export default function CartPage() {
             {c.lineItems.map((l, i) => {
               const li = l.id ? byId.get(l.id) : undefined
               return (
-                <div key={`${l.item.id}-${i}`} className="row" style={{ marginTop: 8 }}>
-                  {li?.item.image_url && <img src={li.item.image_url} alt="" style={{ width: 48, height: 64, objectFit: 'cover', borderRadius: 6 }} />}
+                <div key={`${l.item.id}-${i}`} className="line-item">
+                  {li?.item.image_url ? <img src={li.item.image_url} alt="" /> : <div className="ph" />}
                   <div className="grow small">
                     <div>{li?.item.title ?? <span className="mono">{l.item.id}</span>}</div>
                     {li?.item.price !== undefined && <div className="muted">{formatMoney(li.item.price, c.last?.currency)}</div>}
                   </div>
-                  <button onClick={() => void setQty(c.seller, i, l.quantity - 1)} disabled={busy} aria-label="azalt">
+                  <button onClick={() => void setQty(c.seller, i, l.quantity - 1)} disabled={busy} aria-label="azalt" style={{ padding: '6px 12px' }}>
                     −
                   </button>
                   <span>{l.quantity}</span>
-                  <button onClick={() => void setQty(c.seller, i, l.quantity + 1)} disabled={busy} aria-label="artır">
+                  <button onClick={() => void setQty(c.seller, i, l.quantity + 1)} disabled={busy} aria-label="artır" style={{ padding: '6px 12px' }}>
                     +
                   </button>
                 </div>
@@ -94,7 +94,7 @@ export default function CartPage() {
                 {subtotal ? `Ara toplam (tahmini): ${formatMoney(subtotal.amount, c.last?.currency)}` : ''}
               </div>
               <Link className="btn primary" href={`/checkout?seller=${encodeURIComponent(c.seller)}`}>
-                Satın al
+                {new URL(c.seller).host} için ödeme →
               </Link>
             </div>
           </div>

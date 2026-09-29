@@ -1,6 +1,6 @@
 'use client'
-import { useRouter } from 'next/navigation'
-import { useState } from 'react'
+import { useRouter, useSearchParams } from 'next/navigation'
+import { Suspense, useCallback, useEffect, useState } from 'react'
 
 import { ProductCard } from '@/components/ProductCard'
 import { ApiFailure, api, pushClientLog } from '@/lib/browser'
@@ -11,70 +11,96 @@ type Tab = 'global' | 'seller' | 'lookup'
 
 interface SearchResp {
   products: UiProduct[]
-  messages?: unknown[]
+  messages?: { code?: string; content?: string }[]
   notes?: string[]
   dropped?: { pointer: string }[]
   traces?: unknown[]
 }
 
-export default function SearchPage() {
+const TABS: [Tab, string][] = [
+  ['seller', 'Mağazada ara'],
+  ['global', 'Tüm Shopify'],
+  ['lookup', 'Kimlik / URL'],
+]
+
+const errText = (e: unknown) =>
+  e instanceof ApiFailure ? `${e.error.message}${e.error.hint ? ` — ${e.error.hint}` : ''}` : String(e)
+
+function SearchInner() {
   const router = useRouter()
-  const [tab, setTab] = useState<Tab>('seller')
-  const [query, setQuery] = useState('abaya')
-  const [seller, setSeller] = useState(AAB_US)
-  const [ids, setIds] = useState('')
+  const params = useSearchParams()
+  // The query lives in the URL so "back" from a product re-runs the search
+  // (results are never stored — Catalog terms).
+  const [tab, setTab] = useState<Tab>((params.get('tab') as Tab) || 'seller')
+  const [query, setQuery] = useState(params.get('q') ?? '')
+  const [seller, setSeller] = useState(params.get('seller') ?? AAB_US)
+  const [ids, setIds] = useState(params.get('ids') ?? '')
   const [customVariant, setCustomVariant] = useState('')
   const [busy, setBusy] = useState(false)
   const [res, setRes] = useState<SearchResp | null>(null)
   const [err, setErr] = useState<string | null>(null)
 
-  async function run() {
+  const run = useCallback(async (t: Tab, q: string, sel: string, idList: string) => {
     setBusy(true)
     setErr(null)
     setRes(null)
     try {
       const r =
-        tab === 'lookup'
-          ? await api<SearchResp>('/api/catalog/lookup', {
-              body: { ids: ids.split(/[\s,]+/).filter(Boolean) },
-            })
-          : await api<SearchResp>('/api/catalog/search', {
-              body: { query, seller: tab === 'seller' ? seller : undefined },
-            })
-      pushClientLog({ tool: `catalog:${tab}`, payload: r.traces })
+        t === 'lookup'
+          ? await api<SearchResp>('/api/catalog/lookup', { body: { ids: idList.split(/[\s,]+/).filter(Boolean) } })
+          : await api<SearchResp>('/api/catalog/search', { body: { query: q, seller: t === 'seller' ? sel : undefined } })
+      pushClientLog({ tool: `catalog:${t}`, payload: r.traces })
       setRes(r)
     } catch (e) {
-      setErr(e instanceof ApiFailure ? `${e.error.message}${e.error.hint ? ` — ${e.error.hint}` : ''}` : String(e))
+      setErr(errText(e))
     } finally {
       setBusy(false)
     }
+  }, [])
+
+  // Re-run a search that is in the URL (e.g. after navigating back).
+  useEffect(() => {
+    const q = params.get('q')
+    const i = params.get('ids')
+    if (q || i) void run((params.get('tab') as Tab) || 'seller', q ?? '', params.get('seller') ?? AAB_US, i ?? '')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  function submit() {
+    if (tab === 'lookup' ? !ids.trim() : !query.trim()) return
+    const sp = new URLSearchParams({ tab })
+    if (tab === 'lookup') sp.set('ids', ids)
+    else sp.set('q', query)
+    if (tab === 'seller') sp.set('seller', seller)
+    router.replace(`/?${sp.toString()}`, { scroll: false })
+    void run(tab, query, seller, ids)
   }
 
-  async function quickBuy(p: (typeof PRESETS)[number]) {
+  async function quickBuy(sellerUrl: string, variantId: string) {
     setBusy(true)
     setErr(null)
     try {
-      await api('/api/cart', { body: { action: 'add', seller: p.seller, variantId: p.variantId, quantity: 1 } })
-      router.push(`/checkout?seller=${encodeURIComponent(p.seller)}`)
+      // `ensure`: repeated clicks don't bump the quantity.
+      await api('/api/cart', { body: { action: 'ensure', seller: sellerUrl, variantId, quantity: 1 } })
+      router.push(`/checkout?seller=${encodeURIComponent(sellerUrl)}`)
     } catch (e) {
-      setErr(e instanceof ApiFailure ? `${e.error.message}${e.error.hint ? ` — ${e.error.hint}` : ''}` : String(e))
+      setErr(errText(e))
       setBusy(false)
     }
   }
 
   return (
     <>
-      <h1>Ürün ara</h1>
+      <section className="hero">
+        <p className="eyebrow">Kauna içinde satın alma · Shopify UCP</p>
+        <h1>Tesettür modasını keşfet, Kauna’dan ayrılmadan satın al</h1>
+        <p>Ürünü bul, kargoyu ve toplamı burada gör; ödeme markanın kendi sayfasında.</p>
+      </section>
+
       <div className="card">
-        <div className="chips" style={{ marginBottom: 10 }}>
-          {(
-            [
-              ['seller', 'Satıcı + ürün adı'],
-              ['global', 'Global Catalog (anlama göre)'],
-              ['lookup', 'Kimlik / URL ile'],
-            ] as [Tab, string][]
-          ).map(([t, label]) => (
-            <button key={t} className={`chip ${tab === t ? 'on' : ''}`} onClick={() => setTab(t)}>
+        <div className="seg" role="tablist" style={{ marginBottom: 14 }}>
+          {TABS.map(([t, label]) => (
+            <button key={t} role="tab" aria-selected={tab === t} className={tab === t ? 'on' : ''} onClick={() => setTab(t)}>
               {label}
             </button>
           ))}
@@ -82,43 +108,85 @@ export default function SearchPage() {
         <form
           onSubmit={(e) => {
             e.preventDefault()
-            void run()
+            submit()
           }}
-          className="stack"
         >
           {tab === 'seller' && (
             <div className="field">
-              <label>Satıcı alan adı</label>
-              <input value={seller} onChange={(e) => setSeller(e.target.value)} placeholder="us.aabcollection.com" />
+              <label htmlFor="seller">Mağaza alan adı</label>
+              <input id="seller" value={seller} onChange={(e) => setSeller(e.target.value)} placeholder="us.aabcollection.com" />
             </div>
           )}
-          {tab !== 'lookup' ? (
+          {tab === 'lookup' ? (
             <div className="field">
-              <label>{tab === 'global' ? 'Ne arıyorsun? (anlama göre; marka adıyla aramak iyi sonuç vermez)' : 'Ürün adı'}</label>
-              <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="green tartan maxi dress" />
-            </div>
-          ) : (
-            <div className="field">
-              <label>Varyant/ürün kimlikleri veya ürün URL’leri (boşluk ya da virgülle)</label>
+              <label htmlFor="ids">Varyant/ürün kimlikleri veya ürün adresleri</label>
               <textarea
+                id="ids"
                 rows={3}
                 value={ids}
                 onChange={(e) => setIds(e.target.value)}
-                placeholder="gid://shopify/ProductVariant/54030028341562  https://us.aabcollection.com/products/..."
+                placeholder="gid://shopify/ProductVariant/54030028341562"
               />
             </div>
+          ) : null}
+          <div className="searchbar">
+            {tab !== 'lookup' && (
+              <input
+                aria-label="Ara"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder={tab === 'global' ? 'ör. zeytin yeşili ekose maxi elbise' : 'ör. Green Tartan Maxi'}
+              />
+            )}
+            <button className="primary" disabled={busy} style={tab === 'lookup' ? { width: '100%' } : undefined}>
+              {busy ? 'Aranıyor…' : 'Ara'}
+            </button>
+          </div>
+          {tab === 'global' && (
+            <p className="small muted" style={{ margin: '8px 0 0' }}>
+              Tüm Shopify araması anlama göre çalışır; marka adı yerine ürünü tarif edin.
+            </p>
           )}
-          <button className="primary" disabled={busy}>
-            {busy ? 'Aranıyor…' : 'Ara'}
-          </button>
         </form>
       </div>
 
-      <details className="card">
-        <summary>
-          <strong>Hazır test ürünleri</strong> <span className="muted small">(doğrudan checkout)</span>
-        </summary>
-        <div className="stack" style={{ marginTop: 10 }}>
+      {err && <div className="notice danger">{err}</div>}
+      {res?.notes?.map((n) => (
+        <div key={n} className="notice small">
+          {n}
+        </div>
+      ))}
+      {res?.dropped && res.dropped.length > 0 && (
+        <div className="notice warn small">Şemada olmadığı için gönderilmeyen alanlar: {res.dropped.map((d) => d.pointer).join(', ')}</div>
+      )}
+      {res?.messages?.map((m, i) => (
+        <div key={i} className="notice warn small">
+          {m.code}: {m.content}
+        </div>
+      ))}
+
+      {busy && (
+        <div className="products" aria-busy>
+          {[0, 1, 2, 3].map((i) => (
+            <div key={i} className="skeleton" style={{ aspectRatio: '3/4.6' }} />
+          ))}
+        </div>
+      )}
+      {res && res.products.length === 0 && <div className="empty">Sonuç yok. Farklı kelimeler deneyin.</div>}
+      {res && res.products.length > 0 && (
+        <>
+          <p className="small muted">{res.products.length} ürün</p>
+          <div className="products">
+            {res.products.map((p) => (
+              <ProductCard key={`${p.id}-${p.via}`} p={p} />
+            ))}
+          </div>
+        </>
+      )}
+
+      <details className="card" style={{ marginTop: 20 }}>
+        <summary>Hazır test ürünleri</summary>
+        <div className="stack" style={{ marginTop: 12 }}>
           {PRESETS.map((p) => (
             <div key={p.variantId} className="row">
               <div className="grow">
@@ -128,7 +196,7 @@ export default function SearchPage() {
                 </div>
                 {p.note && <div className="muted small">{p.note}</div>}
               </div>
-              <button onClick={() => void quickBuy(p)} disabled={busy}>
+              <button onClick={() => void quickBuy(p.seller, p.variantId)} disabled={busy}>
                 Checkout’a git
               </button>
             </div>
@@ -139,11 +207,7 @@ export default function SearchPage() {
               e.preventDefault()
               const id = customVariant.trim()
               if (!id) return
-              void quickBuy({
-                label: 'custom',
-                seller,
-                variantId: /^\d+$/.test(id) ? `gid://shopify/ProductVariant/${id}` : id,
-              })
+              void quickBuy(seller, /^\d+$/.test(id) ? `gid://shopify/ProductVariant/${id}` : id)
             }}
           >
             <input className="grow" value={seller} onChange={(e) => setSeller(e.target.value)} aria-label="Satıcı" />
@@ -157,31 +221,19 @@ export default function SearchPage() {
             <button disabled={busy}>Checkout’a git</button>
           </form>
           <p className="muted small">
-            Not: aabcollection.com örnekleri kullanıcıdan gelen products.json verisinden alındı; bu kimliklerin
-            us.aabcollection.com mağazasında da geçerli olup olmadığı “Satıcı + ürün adı” aramasıyla doğrulanmalı.
+            aabcollection.com örnekleri kullanıcının products.json verisinden alındı; us.aabcollection.com’da geçerliliği
+            “Mağazada ara” ile doğrulanmalı.
           </p>
         </div>
       </details>
-
-      {err && <div className="notice danger">{err}</div>}
-      {res?.notes?.map((n) => (
-        <div key={n} className="notice small">
-          {n}
-        </div>
-      ))}
-      {res?.dropped && res.dropped.length > 0 && (
-        <div className="notice warn small">
-          Şemada olmadığı için gönderilmeyen alanlar: {res.dropped.map((d) => d.pointer).join(', ')}
-        </div>
-      )}
-      {res && res.products.length === 0 && <div className="notice">Sonuç yok. Farklı kelimeler deneyin.</div>}
-      {res && res.products.length > 0 && (
-        <div className="products">
-          {res.products.map((p) => (
-            <ProductCard key={`${p.id}-${p.via}`} p={p} />
-          ))}
-        </div>
-      )}
     </>
+  )
+}
+
+export default function SearchPage() {
+  return (
+    <Suspense fallback={null}>
+      <SearchInner />
+    </Suspense>
   )
 }

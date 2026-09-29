@@ -4,7 +4,7 @@
 
 import { logged } from './api'
 import { maskPII } from './mask'
-import { newDraftOrderId, normalizeSeller, observe, type CheckoutDraft, type Session } from './session'
+import { newDraftOrderId, normalizeSeller, observe, type CartState, type CheckoutDraft, type Session } from './session'
 import { analyzeCheckout, type CheckoutAnalysis, type SentFacts } from './ucp/analysis'
 import { extractObject } from './ucp/cart'
 import { buildCheckoutBody, schemaFacts, withUtm, type SchemaFacts } from './ucp/checkout'
@@ -95,6 +95,21 @@ export interface CreateInput {
   discountCodes: string[]
   scenario?: string
   injectWrongField?: boolean
+  /**
+   * Reuse the open checkout for this seller when its lines still match the
+   * cart (one update instead of create + update — Checkout MCP limits are
+   * tight). The checkout page's "Yeni checkout" passes false.
+   */
+  reuse?: boolean
+}
+
+const TERMINAL = new Set(['completed', 'canceled', 'cancelled', 'expired'])
+
+function sameLines(cart: CartState, co: CommerceObject | undefined): boolean {
+  const key = (id: string, q: number) => `${id}×${q}`
+  const a = cart.lineItems.map((l) => key(l.item.id, l.quantity)).sort()
+  const b = (co?.line_items ?? []).map((l) => key(l.item.id, l.quantity)).sort()
+  return a.length > 0 && a.join('|') === b.join('|')
 }
 
 export async function createCheckoutFlow(s: Session, input: CreateInput): Promise<CheckoutView> {
@@ -102,6 +117,24 @@ export async function createCheckoutFlow(s: Session, input: CreateInput): Promis
   const cart = s.carts[seller]
   if (!cart || cart.lineItems.length === 0) {
     throw new UcpError({ kind: 'schema', message: `Sepette ${seller} satıcısından ürün yok.` })
+  }
+  const existing = s.checkouts[seller]
+  if (
+    input.reuse &&
+    existing?.checkoutId &&
+    existing.last &&
+    !TERMINAL.has(existing.last.status ?? '') &&
+    sameLines(cart, existing.last)
+  ) {
+    try {
+      return await updateCheckoutFlow(s, seller, {
+        buyer: input.buyer,
+        includePhone: input.includePhone,
+        discountCodes: input.discountCodes.length ? input.discountCodes : existing.discountCodes,
+      })
+    } catch {
+      // Expired / unknown id → fall through and create a fresh one.
+    }
   }
   const { cf, uf } = await factsFor(seller)
   const draft: CheckoutDraft = {
@@ -121,8 +154,17 @@ export async function createCheckoutFlow(s: Session, input: CreateInput): Promis
 
   // Step 1 — create with line items / cart, buyer, discounts, attribution.
   // The destination goes in step 2 because line_item_ids only exist after create.
-  const c1 = buildCheckoutBody({ draft, facts: cf, cart, includeFulfillment: false })
-  const r1 = await logged(s, seller, () => callTool<Json>(seller, 'create_checkout', { checkout: c1.body }))
+  let c1 = buildCheckoutBody({ draft, facts: cf, cart, includeFulfillment: false })
+  let r1
+  try {
+    r1 = await logged(s, seller, () => callTool<Json>(seller, 'create_checkout', { checkout: c1.body }))
+  } catch (e) {
+    // An expired/unknown cart_id: retry once as buy-now with explicit lines.
+    if (!('cart_id' in c1.body) || !(e instanceof UcpError) || e.kind !== 'jsonrpc') throw e
+    c1 = buildCheckoutBody({ draft, facts: cf, cart: { ...cart, cartId: undefined }, includeFulfillment: false })
+    c1.notes.push('cart_id reddedildi → checkout satırlarla (line_items) oluşturuldu.')
+    r1 = await logged(s, seller, () => callTool<Json>(seller, 'create_checkout', { checkout: c1.body }))
+  }
   traces.push(r1.trace)
   let co = extractObject(r1.data, 'checkout')
   draft.checkoutId = co.id

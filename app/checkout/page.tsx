@@ -1,7 +1,7 @@
 'use client'
 import Link from 'next/link'
 import { useSearchParams } from 'next/navigation'
-import { Suspense, useCallback, useEffect, useState } from 'react'
+import { Fragment, Suspense, useCallback, useEffect, useState } from 'react'
 
 import { PaymentLauncher } from '@/components/PaymentLauncher'
 import { ApiFailure, api, formatMoney, sellerOrigin, type ApiError } from '@/lib/browser'
@@ -109,6 +109,7 @@ function CheckoutInner() {
         setView(r.draft)
         setIncludePhone(r.draft.includePhone)
         setScenario(r.draft.scenario ?? '')
+        setCode(r.draft.discountCodes?.[0] ?? '')
       }
     })
   }, [seller])
@@ -141,304 +142,355 @@ function CheckoutInner() {
     setStatusMsg(`Durum sorgulandı: ${new Date().toLocaleTimeString()}`)
   }
 
-  if (!seller) return <p>Satıcı belirtilmedi. <Link href="/cart">Sepete dön</Link></p>
+  if (!seller)
+    return (
+      <div className="empty">
+        Satıcı belirtilmedi. <Link href="/cart">Sepete dön</Link>
+      </div>
+    )
 
   const a = view?.analysis
   const co = view?.checkout
   const cur = co?.currency ?? a?.currency
+  const host = new URL(seller).host
+  const step = !view?.checkoutId ? 1 : a?.completed ? 4 : closedOnce ? 3 : 2
+  const statusTone =
+    a?.status === 'ready_for_complete' || a?.status === 'completed'
+      ? 'ok'
+      : a?.status === 'requires_escalation' || a?.status === 'incomplete'
+        ? 'warn'
+        : 'danger'
+
+  const summary = view?.checkoutId && a && (
+    <aside className="sticky-summary">
+      <div className="card">
+        <div className="status-head">
+          <h2 style={{ margin: 0 }} className="grow">
+            Sipariş özeti
+          </h2>
+          <span className={`badge ${statusTone}`}>{a.status}</span>
+        </div>
+        <p className="small muted" style={{ margin: '0 0 8px' }}>
+          {host} · Kauna no {view.draftOrderId}
+        </p>
+        {(co?.line_items ?? []).map((li) => (
+          <div key={li.id} className="line-item small">
+            {li.item.image_url ? <img src={li.item.image_url} alt="" /> : <div className="ph" />}
+            <div className="grow">
+              <div style={{ fontWeight: 600 }}>{li.item.title ?? li.item.id}</div>
+              <div className="muted">Adet: {li.quantity}</div>
+            </div>
+            <div>{formatMoney(li.totals?.find((t) => t.type === 'total')?.amount ?? li.item.price, cur)}</div>
+          </div>
+        ))}
+        <table className="totals" style={{ marginTop: 6 }}>
+          <tbody>
+            {/* Merchant's order and labels; never recomputed. */}
+            {a.totals.map((t, i) => (
+              <tr key={`${t.type}-${i}`} className={t.type === 'total' ? 'total' : ''}>
+                <td>{t.display_text ?? t.type}</td>
+                <td>{formatMoney(t.amount, cur)}</td>
+              </tr>
+            ))}
+            {!a.shipping.present && (
+              <tr>
+                <td>Kargo</td>
+                <td className="muted">{a.shipping.text}</td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+        {a.totalsMismatch && (
+          <div className="notice warn small">Kalemlerin toplamı “total” ile tutmuyor — mağaza sayfasında kontrol edin.</div>
+        )}
+        {a.links.length > 0 && (
+          <div className="row small" style={{ marginTop: 12, gap: 12 }}>
+            {a.links.map((l) => (
+              <a key={l.url} href={l.url} target="_blank" rel="noreferrer">
+                {l.title ?? l.type}
+              </a>
+            ))}
+          </div>
+        )}
+      </div>
+    </aside>
+  )
 
   return (
     <>
-      <h1>Checkout · {new URL(seller).host}</h1>
-
-      <div className="card">
-        <div className="grid2">
-          <div className="field">
-            <label>Test senaryosu (bulgular tablosu için etiket)</label>
-            <select value={scenario} onChange={(e) => setScenario(e.target.value)}>
-              <option value="">—</option>
-              {SCENARIOS.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.id}. {s.title}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="field">
-            <label>Seçenekler</label>
-            <label style={{ color: 'inherit' }}>
-              <input type="checkbox" checked={includePhone} onChange={(e) => setIncludePhone(e.target.checked)} /> Telefonu gönder
-            </label>
-            <label style={{ color: 'inherit' }}>
-              <input type="checkbox" checked={injectWrongField} onChange={(e) => setInjectWrongField(e.target.checked)} /> Senaryo 5: yanlış alan adı gönder
-            </label>
-          </div>
-        </div>
-
-        <details open={!view}>
-          <summary>
-            <strong>Alıcı bilgileri</strong> <span className="muted small">(yalnızca sunucu belleğinde tutulur)</span>
-          </summary>
-          <div className="grid2" style={{ marginTop: 10 }}>
-            {(Object.keys(FIELD_LABELS) as (keyof BuyerInfo)[]).map((k) => (
-              <div key={k} className="field">
-                <label>{FIELD_LABELS[k]}</label>
-                <input
-                  value={buyer[k]}
-                  onChange={(e) => setBuyer({ ...buyer, [k]: e.target.value })}
-                  disabled={k === 'address_country'}
-                  inputMode={k === 'phone' ? 'tel' : k === 'email' ? 'email' : undefined}
-                />
-              </div>
-            ))}
-          </div>
-          {!view && (
-            <div className="field">
-              <label>İndirim kodu (isteğe bağlı)</label>
-              <input value={code} onChange={(e) => setCode(e.target.value)} placeholder="ör. KAUNA10" />
-            </div>
-          )}
-        </details>
-        <div className="row" style={{ marginTop: 8 }}>
-          {!view?.checkoutId ? (
-            <button className="primary" onClick={() => void create()} disabled={busy}>
-              {busy ? 'Oluşturuluyor…' : 'Checkout oluştur'}
-            </button>
-          ) : (
-            <>
-              <button onClick={() => void update({ buyer, includePhone })} disabled={busy}>
-                Bilgileri güncelle
-              </button>
-              <button onClick={() => void create()} disabled={busy}>
-                Yeni checkout
-              </button>
-            </>
-          )}
-        </div>
-      </div>
+      <h1>Ödeme · {host}</h1>
+      <ol className="stepper" aria-label="Adımlar">
+        {['Bilgiler', 'Özet', 'Mağazada ödeme', 'Onay'].map((label, i) => (
+          <li key={label} className={i + 1 < step ? 'done' : i + 1 === step ? 'current' : ''}>
+            <span className="dot">{i + 1 < step ? '✓' : i + 1}</span>
+            {label}
+          </li>
+        ))}
+      </ol>
 
       {error && <ErrorBox e={error} />}
 
-      {view?.checkoutId && a && (
-        <>
-          <div className="card">
-            <div className="row">
-              <span className={`badge ${a.status === 'ready_for_complete' ? 'ok' : a.status === 'requires_escalation' ? 'warn' : a.status === 'completed' ? 'ok' : 'danger'}`}>
-                {a.status}
-              </span>
-              <span className="muted small mono grow">{view.checkoutId}</span>
-              <span className="muted small">Kauna taslak no: {view.draftOrderId}</span>
-            </div>
-
-            {a.silentFailures.map((s) => (
-              <div key={s} className="notice danger small">
-                ⚠ {s}
-              </div>
-            ))}
-            {a.unrecoverable.map((m, i) => (
-              <div key={i} className="notice danger small">
-                {m.code}: {m.content} — bu checkout kullanılamaz, yeni checkout başlatın.
-              </div>
-            ))}
-            {a.missingFields.map((m, i) => (
-              <MissingFieldForm
-                key={`${m.code}-${i}`}
-                m={m}
-                busy={busy}
-                onSubmit={(field, value) => {
-                  const next = { ...buyer, [field]: value }
-                  setBuyer(next)
-                  if (field === 'phone') setIncludePhone(true)
-                  void update({ buyer: { [field]: value }, includePhone: field === 'phone' ? true : includePhone })
-                }}
-              />
-            ))}
-            {a.handoff.required && (
-              <div className="notice warn">
-                <strong>Bu mağaza ödemenin kendi sayfasında tamamlanmasını istiyor.</strong>{' '}
-                <span className="small muted">({a.handoff.reason})</span>
-                <div className="small">Aşağıdaki “Ödeme sayfası” bölümünden devam edin.</div>
-              </div>
-            )}
-            {[...a.buyerInput, ...a.buyerReview].map((m, i) => (
-              <div key={i} className="notice small">
-                <span className="mono">{m.code}</span> ({m.severity}): {m.content}
-              </div>
-            ))}
-            {a.warnings.map((m, i) => (
-              <div key={i} className="notice warn small">
-                {m.presentation === 'disclosure' ? <strong>Bildirim: </strong> : null}
-                {m.content} {m.url && <a href={m.url} target="_blank" rel="noreferrer">Ayrıntı</a>}
-              </div>
-            ))}
-            {a.infos.map((m, i) => (
-              <div key={i} className="notice small">
-                {m.content}
-              </div>
-            ))}
-
-            <h3>Ürünler</h3>
-            {(co?.line_items ?? []).map((li) => (
-              <div key={li.id} className="row small" style={{ marginBottom: 6 }}>
-                {li.item.image_url && <img src={li.item.image_url} alt="" style={{ width: 44, height: 58, objectFit: 'cover', borderRadius: 6 }} />}
-                <div className="grow">
-                  {li.item.title ?? li.item.id} × {li.quantity}
+      <div className={view?.checkoutId ? 'layout-2col' : ''}>
+        <div>
+          {view?.checkoutId && a && (
+            <>
+              {a.silentFailures.map((s) => (
+                <div key={s} className="notice danger small">
+                  <strong>Sessiz hata şüphesi</strong>
+                  {s}
                 </div>
-                <div>{formatMoney(li.totals?.find((t) => t.type === 'total')?.amount ?? li.item.price, cur)}</div>
-              </div>
-            ))}
+              ))}
+              {a.unrecoverable.map((m, i) => (
+                <div key={i} className="notice danger small">
+                  <strong>Bu checkout kullanılamaz</strong>
+                  {m.code}: {m.content} — yeni checkout başlatın.
+                </div>
+              ))}
+              {a.missingFields.map((m, i) => (
+                <MissingFieldForm
+                  key={`${m.code}-${i}`}
+                  m={m}
+                  busy={busy}
+                  onSubmit={(field, value) => {
+                    setBuyer({ ...buyer, [field]: value })
+                    if (field === 'phone') setIncludePhone(true)
+                    void update({ buyer: { [field]: value }, includePhone: field === 'phone' ? true : includePhone })
+                  }}
+                />
+              ))}
+              {a.handoff.required && (
+                <div className="notice warn">
+                  <strong>Bu mağaza ödemenin kendi sayfasında tamamlanmasını istiyor.</strong>
+                  <span className="small">
+                    Aşağıdan mağazanın ödeme sayfasını açın; bilgileriniz dolu gelir.{' '}
+                    <span className="muted">({a.handoff.reason})</span>
+                  </span>
+                </div>
+              )}
+              {[...a.buyerInput, ...a.buyerReview].map((m, i) => (
+                <div key={i} className="notice small">
+                  <span className="mono">{m.code}</span> ({m.severity}): {m.content}
+                </div>
+              ))}
+              {a.warnings.map((m, i) => (
+                <div key={i} className="notice warn small">
+                  {m.presentation === 'disclosure' ? <strong>Bildirim</strong> : null}
+                  {m.content}{' '}
+                  {m.url && (
+                    <a href={m.url} target="_blank" rel="noreferrer">
+                      Ayrıntı
+                    </a>
+                  )}
+                </div>
+              ))}
+              {a.infos.map((m, i) => (
+                <div key={i} className="notice small">
+                  {m.content}
+                </div>
+              ))}
 
-            <h3>Özet</h3>
-            <table className="totals">
-              <tbody>
-                {/* Render in the merchant's order, merchant labels; never recompute. */}
-                {a.totals.map((t, i) => (
-                  <tr key={`${t.type}-${i}`} className={t.type === 'total' ? 'total' : ''}>
-                    <td>{t.display_text ?? t.type}</td>
-                    <td>{formatMoney(t.amount, cur)}</td>
-                  </tr>
-                ))}
-                {!a.shipping.present && (
-                  <tr>
-                    <td>Kargo</td>
-                    <td className="muted">{a.shipping.text}</td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-            {a.totalsMismatch && (
-              <div className="notice warn small">Kalemlerin toplamı “total” ile tutmuyor — mağaza sayfasında kontrol edin.</div>
-            )}
-          </div>
+              {view.continueUrl ? (
+                <PaymentLauncher
+                  key={view.continueUrl}
+                  seller={seller}
+                  continueUrl={view.continueUrl}
+                  ucpVersion={typeof view.ucp?.version === 'string' ? view.ucp.version : undefined}
+                  scenario={scenario}
+                  onClosed={() => {
+                    setClosedOnce(true)
+                    void checkStatus()
+                  }}
+                />
+              ) : (
+                <div className="notice warn">Mağaza continue_url döndürmedi.</div>
+              )}
 
-          {a.shippingChoices.length > 0 && (
-            <div className="card">
-              <h2 style={{ marginTop: 0 }}>Kargo seçenekleri</h2>
-              {a.shippingChoices.map((g) => (
-                <div key={g.groupId}>
-                  {g.options.map((o) => (
-                    <label key={o.id} className={`option ${g.selectedOptionId === o.id ? 'on' : ''}`} style={{ color: 'inherit' }}>
-                      <input
-                        type="radio"
-                        name={g.groupId}
-                        checked={g.selectedOptionId === o.id}
-                        disabled={busy}
-                        onChange={() => void update({ selectOption: { groupId: g.groupId, optionId: o.id } })}
-                      />
-                      <span className="grow">
-                        <strong>{o.title ?? o.id}</strong>
-                        {o.estimate && <div className="small muted">Tahmini teslim: {o.estimate}</div>}
-                        {o.carrier && <div className="small muted">{o.carrier}</div>}
-                      </span>
-                      <span>{o.amount !== undefined ? formatMoney(o.amount, cur) : ''}</span>
-                    </label>
+              {a.shippingChoices.length > 0 && (
+                <div className="card">
+                  <h2>Kargo</h2>
+                  {a.shippingChoices.map((g) => (
+                    <div key={g.groupId}>
+                      {g.options.map((o) => (
+                        <label key={o.id} className={`option ${g.selectedOptionId === o.id ? 'on' : ''}`}>
+                          <input
+                            type="radio"
+                            name={g.groupId}
+                            checked={g.selectedOptionId === o.id}
+                            disabled={busy}
+                            onChange={() => void update({ selectOption: { groupId: g.groupId, optionId: o.id } })}
+                          />
+                          <span className="grow">
+                            <strong>{o.title ?? o.id}</strong>
+                            {o.estimate && <div className="small muted">Tahmini teslim: {o.estimate}</div>}
+                            {o.carrier && <div className="small muted">{o.carrier}</div>}
+                          </span>
+                          <span>{o.amount !== undefined ? formatMoney(o.amount, cur) : ''}</span>
+                        </label>
+                      ))}
+                    </div>
                   ))}
+                </div>
+              )}
+
+              <div className="card">
+                <h2>İndirim kodu</h2>
+                <form
+                  className="row"
+                  onSubmit={(e) => {
+                    e.preventDefault()
+                    void update({ discountCodes: code.trim() ? [code.trim()] : [] })
+                  }}
+                >
+                  <input className="grow" value={code} onChange={(e) => setCode(e.target.value)} placeholder="affiliate kuponu" />
+                  <button disabled={busy}>Uygula</button>
+                  {view.discountCodes.length > 0 && (
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => {
+                        setCode('')
+                        void update({ discountCodes: [] })
+                      }}
+                    >
+                      Temizle
+                    </button>
+                  )}
+                </form>
+                <div className="small muted" style={{ marginTop: 8 }}>
+                  Gönderilen: {view.discountCodes.join(', ') || '—'} · Mağazanın yansıttığı: {a.discountCodesEchoed.join(', ') || '—'}
+                </div>
+                {a.discountsApplied.map((d, i) => (
+                  <div key={i} className="notice ok small">
+                    Uygulandı: {String(d.title ?? d.code ?? '')}{' '}
+                    {typeof d.amount === 'number' ? `(−${formatMoney(Math.abs(d.amount), cur)})` : ''}
+                    {d.automatic ? ' · otomatik' : ''}
+                  </div>
+                ))}
+                {view.discountCodes.length > 0 && a.discountsApplied.length === 0 && (
+                  <div className="notice warn small">Kod uygulanmadı. Mağazanın mesajı (varsa) yukarıda.</div>
+                )}
+              </div>
+
+              <div className="card">
+                <div className="row">
+                  <button onClick={() => void checkStatus()} disabled={busy}>
+                    Durumu kontrol et
+                  </button>
+                  <span className="small muted grow">
+                    {closedOnce ? 'Ödeme penceresi kapandı; durum otomatik sorgulandı. ' : ''}
+                    {statusMsg}
+                  </span>
+                </div>
+                {a.completed ? (
+                  <div className="notice ok">
+                    <strong>Sipariş tamamlanmış görünüyor.</strong>
+                    <Link href={`/confirmation?seller=${encodeURIComponent(seller)}`}>Kauna onay ekranı →</Link>
+                  </div>
+                ) : (
+                  <p className="small muted" style={{ marginBottom: 0 }}>
+                    Durum: {a.status} (tamamlanmadı — bu prototipte beklenen budur).
+                  </p>
+                )}
+              </div>
+            </>
+          )}
+
+          <details className="card" open={!view?.checkoutId}>
+            <summary>{view?.checkoutId ? 'Alıcı bilgileri ve test seçenekleri' : 'Alıcı bilgileri'}</summary>
+            <p className="small muted" style={{ marginTop: 6 }}>
+              Yalnızca sunucu belleğinde tutulur; kart bilgisi hiç istenmez.
+            </p>
+            <div className="grid2" style={{ marginTop: 10 }}>
+              {(Object.keys(FIELD_LABELS) as (keyof BuyerInfo)[]).map((k) => (
+                <div key={k} className="field">
+                  <label htmlFor={`f-${k}`}>{FIELD_LABELS[k]}</label>
+                  <input
+                    id={`f-${k}`}
+                    value={buyer[k]}
+                    onChange={(e) => setBuyer({ ...buyer, [k]: e.target.value })}
+                    disabled={k === 'address_country'}
+                    inputMode={k === 'phone' ? 'tel' : k === 'email' ? 'email' : undefined}
+                    autoComplete={
+                      { email: 'email', first_name: 'given-name', last_name: 'family-name', street_address: 'street-address', address_locality: 'address-level2', address_region: 'address-level1', postal_code: 'postal-code', address_country: 'country', phone: 'tel' }[k]
+                    }
+                  />
                 </div>
               ))}
             </div>
-          )}
-
-          <div className="card">
-            <h2 style={{ marginTop: 0 }}>İndirim kodu</h2>
-            <form
-              className="row"
-              onSubmit={(e) => {
-                e.preventDefault()
-                void update({ discountCodes: code ? [code] : [] })
-              }}
-            >
-              <input className="grow" value={code} onChange={(e) => setCode(e.target.value)} placeholder="affiliate kuponu" />
-              <button disabled={busy}>Uygula</button>
-              {view.discountCodes.length > 0 && (
-                <button type="button" disabled={busy} onClick={() => void update({ discountCodes: [] })}>
-                  Temizle
-                </button>
-              )}
-            </form>
-            <div className="small" style={{ marginTop: 6 }}>
-              Gönderilen: {view.discountCodes.join(', ') || '—'} · Mağazanın yansıttığı: {a.discountCodesEchoed.join(', ') || '—'}
-            </div>
-            {a.discountsApplied.map((d, i) => (
-              <div key={i} className="notice ok small">
-                Uygulandı: {String(d.title ?? d.code ?? '')} {typeof d.amount === 'number' ? `(−${formatMoney(d.amount, cur)})` : ''}
-                {d.automatic ? ' · otomatik' : ''}
+            {!view?.checkoutId && (
+              <div className="field">
+                <label htmlFor="f-code">İndirim kodu (isteğe bağlı)</label>
+                <input id="f-code" value={code} onChange={(e) => setCode(e.target.value)} placeholder="ör. KAUNA10" />
               </div>
-            ))}
-            {view.discountCodes.length > 0 && a.discountsApplied.length === 0 && (
-              <div className="notice warn small">Kod uygulanmadı. Mağaza mesajları yukarıda (varsa) gösteriliyor.</div>
             )}
-          </div>
-
-          {a.links.length > 0 && (
-            <div className="card small">
-              <h2 style={{ marginTop: 0 }}>Mağaza politikaları</h2>
-              <div className="row">
-                {a.links.map((l) => (
-                  <a key={l.url} href={l.url} target="_blank" rel="noreferrer">
-                    {l.title ?? l.type}
-                  </a>
-                ))}
+            <div className="grid2" style={{ marginTop: 4 }}>
+              <div className="field">
+                <label htmlFor="f-scenario">Test senaryosu (bulgu etiketi)</label>
+                <select id="f-scenario" value={scenario} onChange={(e) => setScenario(e.target.value)}>
+                  <option value="">—</option>
+                  {SCENARIOS.map((sc) => (
+                    <option key={sc.id} value={sc.id}>
+                      {sc.id}. {sc.title}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="field">
+                <label>Seçenekler</label>
+                <label className="check">
+                  <input type="checkbox" checked={includePhone} onChange={(e) => setIncludePhone(e.target.checked)} /> Telefonu gönder
+                </label>
+                <label className="check">
+                  <input type="checkbox" checked={injectWrongField} onChange={(e) => setInjectWrongField(e.target.checked)} /> Senaryo
+                  5: yanlış alan adı
+                </label>
               </div>
             </div>
-          )}
-
-          {view.continueUrl ? (
-            <PaymentLauncher
-              key={view.continueUrl}
-              seller={seller}
-              continueUrl={view.continueUrl}
-              ucpVersion={typeof view.ucp?.version === 'string' ? view.ucp.version : undefined}
-              scenario={scenario}
-              onClosed={() => {
-                setClosedOnce(true)
-                void checkStatus()
-              }}
-            />
-          ) : (
-            <div className="notice warn">Mağaza continue_url döndürmedi.</div>
-          )}
-
-          <div className="card">
             <div className="row">
-              <button onClick={() => void checkStatus()} disabled={busy}>
-                Durumu kontrol et
-              </button>
-              {closedOnce && <span className="small muted">Ödeme penceresi kapandı; durum otomatik sorgulandı.</span>}
-              {statusMsg && <span className="small muted">{statusMsg}</span>}
+              {!view?.checkoutId ? (
+                <button className="primary block" onClick={() => void create()} disabled={busy}>
+                  {busy ? 'Oluşturuluyor…' : 'Devam et — özeti gör'}
+                </button>
+              ) : (
+                <>
+                  <button className="primary" onClick={() => void update({ buyer, includePhone })} disabled={busy}>
+                    Bilgileri güncelle
+                  </button>
+                  <button onClick={() => void create()} disabled={busy}>
+                    Yeni checkout
+                  </button>
+                </>
+              )}
             </div>
-            {a.completed ? (
-              <div className="notice ok" style={{ marginTop: 8 }}>
-                Sipariş tamamlanmış görünüyor. <Link href={`/confirmation?seller=${encodeURIComponent(seller)}`}>Kauna onay ekranı →</Link>
-              </div>
-            ) : (
-              <p className="small muted">completed değil (durum: {a.status}). Bu prototipte beklenen budur.</p>
-            )}
-          </div>
-
-          <details className="card small">
-            <summary>Teknik ayrıntılar</summary>
-            <div>
-              Telefon alanı (canlı şemadan): <span className="mono">{view.phonePlacement}</span>
-            </div>
-            {view.phoneCandidates && (
-              <div className="mono">
-                {Object.entries(view.phoneCandidates).map(([k, v]) => (
-                  <div key={k}>
-                    {k}: {v}
-                  </div>
-                ))}
-              </div>
-            )}
-            <div>
-              continue_url (UTM’li): <span className="mono">{view.continueUrl}</span>
-            </div>
-            {view.buildNotes.map((n) => (
-              <div key={n}>• {n}</div>
-            ))}
-            <pre>{JSON.stringify(view.ucp?.payment_handlers ?? null, null, 2)}</pre>
           </details>
-        </>
-      )}
+
+          {view?.checkoutId && (
+            <details className="card small">
+              <summary>Teknik ayrıntılar</summary>
+              <dl className="info-list" style={{ marginTop: 10 }}>
+                <dt>checkout</dt>
+                <dd className="mono">{view.checkoutId}</dd>
+                <dt>Telefon alanı</dt>
+                <dd className="mono">{view.phonePlacement}</dd>
+                {view.phoneCandidates &&
+                  Object.entries(view.phoneCandidates).map(([k, v]) => (
+                    <Fragment key={k}>
+                      <dt className="mono">{k}</dt>
+                      <dd>{v}</dd>
+                    </Fragment>
+                  ))}
+                <dt>continue_url</dt>
+                <dd className="mono">{view.continueUrl}</dd>
+              </dl>
+              {view.buildNotes.map((n) => (
+                <div key={n}>• {n}</div>
+              ))}
+              <pre>{JSON.stringify(view.ucp?.payment_handlers ?? null, null, 2)}</pre>
+            </details>
+          )}
+        </div>
+        {summary}
+      </div>
     </>
   )
 }

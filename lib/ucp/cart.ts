@@ -80,7 +80,17 @@ export async function addLine(state: CartState, variantId: string, quantity: num
   return { state, traces, notes }
 }
 
+/** "Satın al": make sure the variant is in the cart without bumping quantity. */
+export async function ensureLine(state: CartState, variantId: string, quantity: number): Promise<CartOpResult> {
+  if (state.lineItems.some((l) => l.item.id === variantId)) return { state, traces: [], notes: [] }
+  return addLine(state, variantId, quantity)
+}
+
 export async function setQuantity(state: CartState, index: number, quantity: number): Promise<CartOpResult> {
+  // Guard: splice(-1) would silently drop the last line.
+  if (!Number.isInteger(index) || index < 0 || index >= state.lineItems.length) {
+    return { state, traces: [], notes: ['Geçersiz satır.'] }
+  }
   if (quantity <= 0) state.lineItems.splice(index, 1)
   else if (state.lineItems[index]) state.lineItems[index].quantity = quantity
   if (state.lineItems.length === 0) {

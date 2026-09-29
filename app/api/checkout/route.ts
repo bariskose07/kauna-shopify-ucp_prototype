@@ -14,6 +14,7 @@ interface Body {
   discountCodes?: string[]
   scenario?: string
   injectWrongField?: boolean
+  reuse?: boolean
 }
 
 // "Satın al": create the checkout (from the seller's cart) and immediately
@@ -31,6 +32,7 @@ export async function POST(req: Request) {
       discountCodes: (b.discountCodes ?? []).filter(Boolean),
       scenario: b.scenario || undefined,
       injectWrongField: b.injectWrongField,
+      reuse: b.reuse === true,
     })
     return NextResponse.json(v)
   } catch (e) {

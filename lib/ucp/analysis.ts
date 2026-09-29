@@ -179,7 +179,7 @@ export function analyzeCheckout(co: CommerceObject, sent: SentFacts): CheckoutAn
     shippingChoices,
     links: co.links ?? [],
     discountsApplied: (discounts.applied as Json[]) ?? [],
-    discountCodesEchoed: (discounts.codes as string[]) ?? [],
+    discountCodesEchoed: (discounts.codes as string[]) ?? (co.discount_codes as string[] | undefined) ?? [],
     silentFailures,
     completed: status === 'completed' || Boolean(co.order),
   }

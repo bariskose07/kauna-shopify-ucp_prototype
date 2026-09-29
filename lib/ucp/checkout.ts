@@ -57,6 +57,11 @@ export interface SchemaFacts {
   supportsGroups: boolean
   supportsMethodId: boolean
   supportsDiscounts: boolean
+  /**
+   * Where discount codes go, read from the schema. UCP core uses
+   * `discounts.codes`; ucp-cli's extension hint mentions `discount_codes[]`.
+   */
+  discountShape: 'discounts.codes' | 'discount_codes' | 'none'
   attribution: { supported: boolean; keys: string[]; open: boolean }
   supportsContext: boolean
   supportsCartId: boolean
@@ -85,7 +90,8 @@ export function schemaFacts(schema: unknown, op: 'create' | 'update'): SchemaFac
     supportsLineItemIds: has('fulfillment.methods[].line_item_ids'),
     supportsGroups: has('fulfillment.methods[].groups[].selected_option_id'),
     supportsMethodId: has('fulfillment.methods[].id'),
-    supportsDiscounts: has('discounts.codes'),
+    supportsDiscounts: has('discounts.codes') || has('discount_codes'),
+    discountShape: has('discounts.codes') ? 'discounts.codes' : has('discount_codes') ? 'discount_codes' : 'none',
     attribution: {
       supported: pathStatus(s, 'checkout.attribution') === 'present',
       keys: attr.keys,
@@ -184,8 +190,10 @@ export function buildCheckoutBody({ draft, facts, last, cart, includeFulfillment
   }
 
   // 4. discount codes (resent every time; [] clears)
-  if (facts.supportsDiscounts) body.discounts = { codes: draft.discountCodes }
-  else if (draft.discountCodes.length > 0) notes.push('Şema discounts.codes içermiyor → indirim kodu gönderilemedi.')
+  if (facts.discountShape === 'discounts.codes') body.discounts = { codes: draft.discountCodes }
+  else if (facts.discountShape === 'discount_codes') body.discount_codes = draft.discountCodes
+  else if (draft.discountCodes.length > 0)
+    notes.push('Şema indirim kodu alanı içermiyor (discounts.codes / discount_codes) → kod gönderilemedi.')
 
   // 5. attribution
   if (facts.attribution.supported) {

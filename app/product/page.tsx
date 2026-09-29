@@ -149,8 +149,8 @@ function ProductInner() {
     setBusy(true)
     setErr(null)
     try {
-      await api('/api/cart', { body: { action: 'add', seller: sellerUrl, variantId: variant.id, quantity: qty } })
-      const v = await api<{ continueUrl?: string }>('/api/checkout', { body: { seller: sellerUrl, includePhone: true } })
+      await api('/api/cart', { body: { action: 'ensure', seller: sellerUrl, variantId: variant.id, quantity: qty } })
+      const v = await api<{ continueUrl?: string }>('/api/checkout', { body: { seller: sellerUrl, includePhone: true, reuse: true } })
       if (v.continueUrl) {
         if (w && !w.closed) w.location.href = v.continueUrl
         else window.open(v.continueUrl, '_blank', 'noopener')
@@ -192,10 +192,28 @@ function ProductInner() {
     }
   }
 
-  if (!p) return <>{err ? <div className="notice danger">{err}</div> : <p className="muted">Yükleniyor…</p>}</>
+  if (!p)
+    return err ? (
+      <div className="notice danger">{err}</div>
+    ) : (
+      <div className="pdp" aria-busy>
+        <div className="skeleton" style={{ aspectRatio: '3/4' }} />
+        <div className="stack">
+          <div className="skeleton" style={{ height: 32, width: '70%' }} />
+          <div className="skeleton" style={{ height: 24, width: '30%' }} />
+          <div className="skeleton" style={{ height: 120 }} />
+        </div>
+      </div>
+    )
+
+  const unavailable = !variant || variant.available === false
+  const shipKnown = estimate && (estimate.amount !== undefined || estimate.choices.some((c) => c.options.length))
 
   return (
     <>
+      <button className="link small" onClick={() => router.back()} style={{ marginBottom: 12 }}>
+        ← Geri
+      </button>
       <div className="pdp">
         <div className="gallery">
           {/* Live CDN URLs from the response; nothing is cached server-side. */}
@@ -203,137 +221,112 @@ function ProductInner() {
             <img key={m.url} src={m.url} alt={m.alt ?? p.title} />
           ))}
         </div>
-        <div>
-          <h1>{p.title}</h1>
-          <div style={{ fontSize: '1.2rem', fontWeight: 700 }}>
-            {formatMoney(variant?.price.amount, variant?.price.currency)}{' '}
+
+        <div className="pdp-info">
+          <p className="eyebrow">{variant?.sellerName ?? p.sellerName ?? sellerDomain ?? ''}</p>
+          <h1 style={{ marginBottom: 8 }}>{p.title}</h1>
+          <div className="row" style={{ gap: 8, marginBottom: 14 }}>
+            <span className="price-lg">{formatMoney(variant?.price.amount, variant?.price.currency)}</span>
             {variant?.compareAt?.amount ? (
-              <s className="muted small">{formatMoney(variant.compareAt.amount, variant.compareAt.currency)}</s>
+              <s className="muted">{formatMoney(variant.compareAt.amount, variant.compareAt.currency)}</s>
             ) : null}
-          </div>
-          <div className="muted small">Para birimi: {variant?.price.currency ?? 'bilinmiyor (products.json)'}</div>
-
-          <div className="notice small" style={{ marginTop: 8 }}>
-            {estLoading && 'Kargo ücreti hesaplanıyor…'}
-            {!estLoading && estimate && (estimate.amount !== undefined || estimate.choices.some((c) => c.options.length)) && (
-              <>
-                <strong>
-                  Kargo{estimate.destination ? ` (${estimate.destination})` : ''}:{' '}
-                  {estimate.amount !== undefined ? formatMoney(estimate.amount, estimate.currency) : 'seçeneğe göre'}
-                </strong>
-                {estimate.choices.flatMap((c) => c.options).map((o) => (
-                  <div key={o.id}>
-                    {o.title ?? o.id}: {o.amount !== undefined ? formatMoney(o.amount, estimate.currency) : '—'}
-                    {o.estimate ? ` · ${o.estimate}` : ''}
-                  </div>
-                ))}
-                <div className="muted">
-                  Kaynak: {estimate.source === 'cart' ? 'sepet tahmini' : 'mağaza checkout’u'} · adres: kayıtlı / test adresi
-                </div>
-              </>
-            )}
-            {!estLoading && estimate && estimate.amount === undefined && !estimate.choices.some((c) => c.options.length) && (
-              <>
-                Kargo ödeme adımında hesaplanır.
-                {estimate.notes.length > 0 && <div className="muted">{estimate.notes.join(' · ')}</div>}
-                {estimate.checkoutAvailable && (
-                  <div style={{ marginTop: 6 }}>
-                    <button onClick={() => requestEstimate(true)} disabled={estLoading}>
-                      Kargoyu hesapla (mağaza checkout’u ile)
-                    </button>
-                  </div>
-                )}
-              </>
-            )}
+            {variant?.available === true && <span className="badge ok">Stokta{variant.runningLow ? ' · az kaldı' : ''}</span>}
+            {variant?.available === false && <span className="badge danger">Stokta yok</span>}
           </div>
 
-          {p.options.length > 0 &&
-            p.options.map((o) => (
-              <div key={o.name} className="field" style={{ marginTop: 10 }}>
-                <label>{o.name}</label>
-                <div className="chips">
-                  {o.values
-                    .filter((v) => v.exists !== false)
-                    .map((v) => {
-                      const on = selected.some((s) => s.name === o.name && s.label === v.label)
-                      return (
-                        <button
-                          key={v.label}
-                          className={`chip ${on ? 'on' : ''} ${v.available === false ? 'off' : ''}`}
-                          onClick={() => choose(o.name, v.label)}
-                          disabled={busy}
-                          title={v.available === false ? 'Stokta yok' : ''}
-                        >
-                          {v.label}
-                        </button>
-                      )
-                    })}
-                </div>
+          {p.options.map((o) => (
+            <div key={o.name} className="field">
+              <label>{o.name}</label>
+              <div className="chips">
+                {o.values
+                  .filter((v) => v.exists !== false)
+                  .map((v) => {
+                    const on = selected.some((s) => s.name === o.name && s.label === v.label)
+                    return (
+                      <button
+                        key={v.label}
+                        className={`chip ${on ? 'on' : ''} ${v.available === false ? 'off' : ''}`}
+                        onClick={() => choose(o.name, v.label)}
+                        disabled={busy}
+                        aria-pressed={on}
+                        title={v.available === false ? 'Stokta yok' : ''}
+                      >
+                        {v.label}
+                      </button>
+                    )
+                  })}
               </div>
-            ))}
+            </div>
+          ))}
           {p.options.length === 0 && p.variants.length > 1 && (
-            <div className="notice small">Satıcı yapılandırılmış seçenek matrisi vermiyor; öne çıkan varyant kullanılıyor.</div>
+            <div className="notice small">Satıcı seçenek matrisi vermiyor; öne çıkan varyant kullanılıyor.</div>
           )}
 
-          <div className="card small" style={{ marginTop: 10 }}>
-            <div>
-              Varyant: <span className="mono">{variant?.id}</span> {variant?.title ? `(${variant.title})` : ''}
-            </div>
-            <div>
-              Stok:{' '}
-              {variant?.available === true ? (
-                <span className="badge ok">var{variant.runningLow ? ' · az kaldı' : ''}</span>
-              ) : variant?.available === false ? (
-                <span className="badge danger">yok</span>
-              ) : (
-                <span className="badge">bilinmiyor</span>
-              )}{' '}
-              {variant?.availabilityStatus && <span className="muted">({variant.availabilityStatus})</span>}
-            </div>
-            <div>
-              eligible.native_checkout:{' '}
-              <span className={`badge ${variant?.nativeCheckout === false ? 'warn' : variant?.nativeCheckout ? 'ok' : ''}`}>
-                {String(variant?.nativeCheckout ?? 'bilinmiyor')}
-              </span>
-              {variant?.nativeCheckout === false && (
-                <div className="muted">
-                  false = sipariş API ile tamamlanamaz; checkout yine oluşturulur, ödeme mağazanın sayfasında yapılır.
-                </div>
+          {/* Shipping estimate — computed in the background, no redirect. */}
+          <div className="ship-card" style={{ margin: '14px 0' }} aria-live="polite">
+            <span className="icon" aria-hidden>
+              🚚
+            </span>
+            <div className="grow">
+              {estLoading && <span className="muted">Kargo ücreti hesaplanıyor…</span>}
+              {!estLoading && shipKnown && estimate && (
+                <>
+                  <strong>
+                    Kargo: {estimate.amount !== undefined ? formatMoney(estimate.amount, estimate.currency) : 'seçeneğe göre'}
+                  </strong>
+                  <span className="muted"> · {estimate.destination}</span>
+                  {estimate.choices
+                    .flatMap((c) => c.options)
+                    .map((o) => (
+                      <div key={o.id} className="small">
+                        {o.title ?? o.id}: {o.amount !== undefined ? formatMoney(o.amount, estimate.currency) : '—'}
+                        {o.estimate ? <span className="muted"> · {o.estimate}</span> : null}
+                      </div>
+                    ))}
+                  <div className="small muted">{estimate.source === 'cart' ? 'Sepet tahmini' : 'Mağaza checkout’undan'}</div>
+                </>
               )}
+              {!estLoading && estimate && !shipKnown && (
+                <>
+                  <span>Kargo ödeme adımında hesaplanır.</span>
+                  {estimate.checkoutAvailable && (
+                    <div style={{ marginTop: 6 }}>
+                      <button className="small" onClick={() => requestEstimate(true)} disabled={estLoading}>
+                        Kargoyu hesapla
+                      </button>
+                    </div>
+                  )}
+                  {estimate.notes.length > 0 && (
+                    <details className="small muted" style={{ marginTop: 6 }}>
+                      <summary>Neden?</summary>
+                      {estimate.notes.join(' · ')}
+                    </details>
+                  )}
+                </>
+              )}
+              {!estLoading && !estimate && <span className="muted">Kargo: varyant seçin</span>}
             </div>
-            <div>
-              Satıcı: <span className="mono">{variant?.sellerDomain ?? '—'}</span>{' '}
-              {variant?.sellerName ? `(${variant.sellerName})` : ''}
-            </div>
-            <div className="muted">Kaynak: {p.source}</div>
           </div>
 
-          <div className="row" style={{ marginTop: 10 }}>
+          <div className="buybar">
             <input
+              className="qty"
               type="number"
               min={1}
               value={qty}
               onChange={(e) => setQty(Math.max(1, Number(e.target.value) || 1))}
-              style={{ width: 80 }}
               aria-label="Adet"
             />
-            <button onClick={() => void add(false)} disabled={busy || !variant || variant.available === false}>
+            <button onClick={() => void add(false)} disabled={busy || unavailable || !sellerUrl}>
               Sepete ekle
             </button>
-            <button className="primary" onClick={() => void buyNow()} disabled={busy || !variant || !sellerUrl || variant.available === false}>
+            <button className="primary" onClick={() => void buyNow()} disabled={busy || unavailable || !sellerUrl}>
               {busy ? 'Hazırlanıyor…' : 'Satın al'}
             </button>
           </div>
-          {variant?.checkoutUrl && (
-            <p className="small" style={{ marginTop: 8 }}>
-              Yedek:{' '}
-              {/* Catalog's merchant-hosted buy-now link — no UCP checkout involved. */}
-              <a href={variant.checkoutUrl} target="_blank" rel="noopener noreferrer">
-                Mağazanın ödeme sayfasına doğrudan git (checkout_url) →
-              </a>{' '}
-              <span className="muted">UCP checkout’u oluşturulamazsa kullan; özet/kargo Kauna’da gösterilmez.</span>
-            </p>
-          )}
+          <p className="small muted" style={{ marginTop: 8 }}>
+            Satın al: bilgilerin dolu olarak mağazanın ödeme sayfası açılır. Ödeme markanın kendi sayfasında yapılır.
+          </p>
           {info && <div className="notice ok small">{info}</div>}
           {err && <div className="notice danger small">{err}</div>}
           {data?.notes?.map((n) => (
@@ -346,7 +339,38 @@ function ProductInner() {
               {m.code}: {m.content}
             </div>
           ))}
-          {p.description && <p className="small" style={{ marginTop: 12 }}>{p.description.slice(0, 900)}</p>}
+
+          {p.description && <p style={{ marginTop: 16 }}>{p.description.slice(0, 900)}</p>}
+
+          <details className="card small" style={{ marginTop: 16 }}>
+            <summary>Teknik ayrıntılar</summary>
+            <dl className="info-list" style={{ marginTop: 10 }}>
+              <dt>Varyant</dt>
+              <dd className="mono">{variant?.id}</dd>
+              <dt>native_checkout</dt>
+              <dd>
+                <span className={`badge ${variant?.nativeCheckout === false ? 'warn' : variant?.nativeCheckout ? 'ok' : ''}`}>
+                  {String(variant?.nativeCheckout ?? 'bilinmiyor')}
+                </span>
+                {variant?.nativeCheckout === false && (
+                  <div className="muted">Sipariş API ile tamamlanamaz; ödeme mağazanın sayfasında yapılır.</div>
+                )}
+              </dd>
+              <dt>seller.domain</dt>
+              <dd className="mono">{sellerDomain ?? '—'}</dd>
+              <dt>Kaynak</dt>
+              <dd>{p.source}</dd>
+              <dt>Para birimi</dt>
+              <dd>{variant?.price.currency ?? 'bilinmiyor (products.json)'}</dd>
+            </dl>
+            {variant?.checkoutUrl && (
+              <p style={{ marginBottom: 0 }}>
+                <a href={variant.checkoutUrl} target="_blank" rel="noopener noreferrer">
+                  Yedek: mağazanın satın alma bağlantısı (checkout_url) →
+                </a>
+              </p>
+            )}
+          </details>
         </div>
       </div>
     </>

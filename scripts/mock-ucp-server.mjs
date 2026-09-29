@@ -65,7 +65,7 @@ const checkoutBody = {
 }
 const cartBody = {
   type: 'object',
-  properties: { line_items: checkoutBody.properties.line_items, context: checkoutBody.properties.context },
+  properties: { line_items: checkoutBody.properties.line_items, context: checkoutBody.properties.context, fulfillment: checkoutBody.properties.fulfillment },
 }
 const meta = { type: 'object' }
 const tools = [
@@ -75,9 +75,46 @@ const tools = [
   { name: 'create_checkout', inputSchema: { type: 'object', properties: { meta, checkout: checkoutBody } } },
   { name: 'update_checkout', inputSchema: { type: 'object', properties: { meta, id: { type: 'string' }, checkout: checkoutBody } } },
   { name: 'get_checkout', inputSchema: { type: 'object', properties: { meta, id: { type: 'string' } } } },
+  { name: 'search_catalog', inputSchema: { type: 'object', properties: { meta: { type: 'object', properties: { 'ucp-agent': { type: 'object' } } }, catalog: { type: 'object', properties: { query: { type: 'string' }, context: { type: 'object' }, pagination: { type: 'object' }, filters: { type: 'object' } } } } } },
+  { name: 'get_product', inputSchema: { type: 'object', properties: { meta, catalog: { type: 'object', properties: { id: { type: 'string' }, selected: { type: 'array' }, preferences: { type: 'array' }, context: { type: 'object' } } } } } },
+  { name: 'lookup_catalog', inputSchema: { type: 'object', properties: { meta, catalog: { type: 'object', properties: { ids: { type: 'array' }, filters: { type: 'object' }, context: { type: 'object' } } } } } },
 ]
 
 const PRICE = 13400
+
+// ── catalog (so the whole UI can be exercised offline) ──────────────────────
+const HOST = `localhost:${PORT}`
+const IMG = (c) => `data:image/svg+xml;utf8,${encodeURIComponent(`<svg xmlns='http://www.w3.org/2000/svg' width='600' height='800'><rect width='600' height='800' fill='${c}'/><text x='300' y='420' font-size='40' text-anchor='middle' fill='white' font-family='sans-serif'>mock</text></svg>`)}`
+const seller = { name: 'Aab (mock)', domain: HOST, url: `https://${HOST}`, id: 'gid://shopify/Shop/1' }
+const mkVariant = (id, length, size, available = true) => ({
+  id: `gid://shopify/ProductVariant/${id}`,
+  title: `${length} / ${size}`,
+  price: { amount: PRICE, currency: 'USD' },
+  availability: { available, status: available ? 'in_stock' : 'out_of_stock' },
+  eligible: { native_checkout: false },
+  requires: { shipping: true },
+  options: [{ name: 'Dress length', label: length }, { name: 'Size', label: size }],
+  seller,
+  url: `https://${HOST}/products/green-tartan-maxi`,
+  checkout_url: `https://${HOST}/cart/${id}:1`,
+})
+const PRODUCT = {
+  id: 'gid://shopify/p/mock1',
+  title: 'Green Tartan Maxi',
+  description: { plain: 'Mock product for offline UI tests.' },
+  url: `https://${HOST}/products/green-tartan-maxi`,
+  media: [{ url: IMG('#4a5a3a'), alt_text: 'front' }, { url: IMG('#6b5a3a'), alt_text: 'back' }],
+  price_range: { min: { amount: PRICE, currency: 'USD' }, max: { amount: PRICE, currency: 'USD' } },
+  options: [
+    { name: 'Dress length', values: [{ label: '52 in', available: true, exists: true }, { label: '54 in', available: true, exists: true }] },
+    { name: 'Size', values: [{ label: 'XXS', available: true, exists: true }, { label: 'XS', available: false, exists: true }] },
+  ],
+  variants: [mkVariant(1001, '52 in', 'XXS'), mkVariant(1002, '54 in', 'XXS'), mkVariant(1003, '52 in', 'XS', false)],
+}
+const PRODUCT2 = { ...PRODUCT, id: 'gid://shopify/p/mock2', title: 'Summer Tweed Maxi', media: [{ url: IMG('#7a6a55') }], variants: [mkVariant(2001, '52 in', 'XXS')], options: [] }
+// Search results deliberately omit variants[].seller on the 2nd product
+// (seen live: seller not always on every variant) → exercises the fallback.
+const searchProducts = () => [PRODUCT, { ...PRODUCT2, seller, variants: PRODUCT2.variants.map(({ seller: _s, ...v }) => v) }]
 const carts = new Map()
 const checkouts = new Map()
 const ucpMeta = {
@@ -182,7 +219,11 @@ function call(name, a) {
       const id = `gid://shopify/Cart/${randomUUID().slice(0, 8)}`
       const cart = { id, line_items: lines(a.cart.line_items) }
       carts.set(id, cart)
-      return { ucp: ucpMeta, ...cart, currency: 'USD', totals: [{ type: 'subtotal', amount: PRICE }, { type: 'total', amount: PRICE }] }
+      const dest = a.cart.fulfillment?.methods?.[0]?.destinations?.[0]
+      const totals = [{ type: 'subtotal', amount: PRICE }]
+      if (dest) totals.push({ type: 'fulfillment', amount: 1490, display_text: 'Shipping (estimate)' })
+      totals.push({ type: 'total', amount: totals.reduce((x, t) => x + t.amount, 0) })
+      return { ucp: ucpMeta, ...cart, currency: 'USD', totals, fulfillment: dest ? { methods: [{ type: 'shipping', destinations: [dest], groups: [{ id: 'g_1', selected_option_id: 'std', options: [{ id: 'std', title: 'Standard', totals: [{ type: 'total', amount: 1490 }] }] }] }] } : undefined }
     }
     case 'update_cart': {
       const cart = carts.get(a.id)
@@ -203,6 +244,16 @@ function call(name, a) {
     }
     case 'get_checkout':
       return render(checkouts.get(a.id))
+    case 'search_catalog':
+      return { ucp: ucpMeta, products: searchProducts().filter((p) => p.title.toLowerCase().includes(String(a.catalog.query ?? '').toLowerCase().split(' ')[0] ?? '')) }
+    case 'lookup_catalog':
+      return { ucp: ucpMeta, products: [PRODUCT] }
+    case 'get_product': {
+      const sel = a.catalog.selected ?? []
+      const p = a.catalog.id === PRODUCT2.id ? PRODUCT2 : PRODUCT
+      const match = p.variants.filter((v) => sel.every((s) => v.options.some((o) => o.name === s.name && o.label === s.label)))
+      return { ucp: ucpMeta, product: { ...p, selected: sel.length ? sel : p.variants[0].options, variants: match.length ? match : p.variants } }
+    }
     default:
       return null
   }
@@ -216,7 +267,7 @@ const server = createServer({ cert: readFileSync(process.env.MOCK_TLS_CERT), key
   if (req.method === 'GET' && req.url === '/.well-known/ucp') {
     return send(200, { ucp: { version: V, services: { 'dev.ucp.shopping': [{ version: V, transport: 'mcp', endpoint: `${ORIGIN}/api/ucp/mcp` }] }, ...ucpMeta } })
   }
-  if (req.method === 'GET' && req.url.startsWith('/checkouts/')) {
+  if (req.method === 'GET' && (req.url.startsWith('/checkouts/') || req.url.startsWith('/cart/'))) {
     res.writeHead(200, { 'Content-Type': 'text/html', 'X-Frame-Options': 'DENY' })
     return res.end('<h1>Mock merchant checkout</h1><p>Do not press Pay.</p>')
   }

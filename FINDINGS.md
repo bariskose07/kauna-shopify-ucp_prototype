@@ -100,7 +100,28 @@ Seçilen yol ve dört adayın şemadaki durumu (`present/absent/unknown`) checko
 - **Hız limiti (429):** Ürün sayfasındaki otomatik kargo tahmini her görüntülemede geçici bir checkout (create + update) açınca kısa sürede `HTTP 429`, `Retry-After: 3588` (≈ 1 saat) alındı. Checkout MCP limitleri gerçekten sıkı ve pencere saat mertebesinde. Önlemler: otomatik tahmin yalnızca Cart MCP ile; checkout ile tahmin yalnızca açık tıklamayla; tahminler sekme belleğinde tutuluyor; 429 sonrası süre bitene kadar o uç noktaya hiç istek gönderilmiyor (devre kesici); Satın al 429'da Catalog `checkout_url`'ine düşüyor (form dolu değil).
 - "Satıcı + ürün adı" (us.aabcollection.com): satıcının UCP araması yukarıdaki `idempotency-key` nedeniyle başlangıçta engellendi (düzeltildi). Global Catalog sonuçlarında AAB bulunmadı; `/products.json` yedeği sonuç verdi.
 
-## 9. Sonraki adımlar (kendi makinenizde)
+## 9. Kapsamlı inceleme (2026-09-29) — bulunan ve düzeltilen hatalar
+
+Kaynak yeniden tarandı (`@shopify/ucp-cli` 0.9.0 `cli/cta.ts`, `core/escalation.ts`; `@shopify/checkout-kit` 4.0.0-alpha.4) ve kod baştan sona gözden geçirildi.
+
+| # | Sorun | Etki | Düzeltme |
+| --- | --- | --- | --- |
+| 1 | İndirim kodu yalnızca `discounts.codes` biçiminde aranıyordu; ucp-cli ipucu `discount_codes[]` biçimini de anıyor | Şema diğer biçimi kullanırsa kod hiç gönderilmezdi | Biçim şemadan okunuyor (`discountShape`) |
+| 2 | MCP `isError: true` yanıtları başarılı sayılıyordu | Araç hatası boş checkout gibi görünürdü | UCP nesnesi taşımayan `isError` → protokol hatası |
+| 3 | Paralel Catalog çağrıları token'ı birden çok kez istiyordu | Gereksiz token istekleri | Tek bekleyen istek paylaşılıyor |
+| 4 | "Satın al" her tıklamada sepete aynı ürünü **yeniden ekliyordu** (adet 1→2→3) | Yanlış adet + her seferinde yeni checkout | `ensure` işlemi; adet artmaz |
+| 5 | "Satın al" her tıklamada yeni checkout açıyordu (create + update) | Checkout MCP limiti hızla doluyordu | Satırlar aynıysa mevcut checkout tek `update` ile yeniden kullanılıyor |
+| 6 | Süresi dolmuş `cart_id` ile checkout oluşturma başarısızdı | Satın al kırılırdı | Bir kez `line_items` ile yeniden deneniyor |
+| 7 | Sepet güncellemesi reddedilince artırılan adet geri alınmıyordu | Yerel sepet ile mağaza ayrışırdı | Tam anlık görüntüyle geri alma |
+| 8 | `setQuantity` geçersiz sıra numarasında `splice(-1)` ile **son ürünü siliyordu** | Yanlış ürün silinirdi | Sıra numarası denetimi |
+| 9 | Ürün sayfasında satıcı bulunamazsa sepet Catalog adresine yönleniyordu | Satın al yanlış uç noktaya giderdi | Satıcı: varyant → ürün düzeyi → PDP host; Catalog'a asla düşmez |
+| 10 | Arama sonrası üründen geri dönünce sonuçlar kayboluyordu | Kullanılabilirlik | Sorgu URL'de; geri gelince yeniden çalışır (sunucuda saklanmaz) |
+| 11 | "Temizle" kod kutusunu boşaltmıyordu; negatif indirim "−−" gösteriyordu; yenilemede kod kayboluyordu | Arayüz | Düzeltildi |
+| 12 | `incomplete` durumu kırmızı (hata gibi) gösteriliyordu | Yanlış yönlendirme | Sarı (eylem gerekli) |
+
+Uçtan uca test (sahte mağaza, Playwright; mobil 390×844 açık tema + masaüstü 1280 koyu tema): arama, satıcı gösterimi, geri dönüş, varyant seçimi, tıklamasız kargo tahmini, Satın al → ödeme sayfası (UTM'li), checkout yeniden kullanımı, adet koruması, geçersiz/geçerli indirim, kargo seçeneği, senaryo 1/2, durum kontrolü, sepet sayacı, PII maskesi, bulgu tablosu, mod A hazırlığı, yatay taşma ve sayfa hataları → **56/56 geçti**. Birim testleri 31/31.
+
+## 10. Sonraki adımlar (kendi makinenizde)
 
 1. `npm run dev` → Hata ayıklama → Mağaza keşfi: `us.aabcollection.com`. `checkoutSchemaFacts.phonePlacement`, `attribution`, `supportsDiscounts` ve `supportsCartId` değerlerini bu dosyaya işleyin.
 2. Senaryoları 1→8 sırasıyla çalıştırın ve "Bulguları kopyala" çıktısını bu dosyaya ekleyin.

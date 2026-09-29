@@ -70,6 +70,8 @@ const g = globalThis as unknown as {
 const discCache = (g.__ucpDisc ??= new Map())
 const toolsCache = (g.__ucpTools ??= new Map())
 
+let tokenInFlight: Promise<string | undefined> | undefined
+
 export async function getAccessToken(): Promise<string | undefined> {
   const id = process.env.SHOPIFY_CLIENT_ID
   const secret = process.env.SHOPIFY_CLIENT_SECRET
@@ -77,6 +79,14 @@ export async function getAccessToken(): Promise<string | undefined> {
   const cached = g.__ucpToken
   // Refresh 5 minutes early; tokens are documented as valid for 60 minutes.
   if (cached && cached.expiresAt - 5 * 60_000 > Date.now()) return cached.token
+  // Parallel catalog calls share one token request.
+  tokenInFlight ??= fetchToken(id, secret).finally(() => {
+    tokenInFlight = undefined
+  })
+  return tokenInFlight
+}
+
+async function fetchToken(id: string, secret: string): Promise<string | undefined> {
   let res: Response
   try {
     res = await fetch('https://api.shopify.com/auth/access_token', {
@@ -281,11 +291,6 @@ async function authHeaders(endpoint: string): Promise<Record<string, string>> {
   return token ? { Authorization: `Bearer ${token}` } : {}
 }
 
-/**
- * One JSON-RPC call. Protocol failures throw UcpError; a successful `result`
- * is returned untouched (business messages inside it are NOT errors).
- * HTTP 429 → wait `Retry-After` once when it is short, otherwise surface it.
- */
 // Endpoint → epoch ms until which the business asked us to back off (429).
 // While blocked we do not call it at all: hammering a rate-limited endpoint
 // can only prolong the block. Observed live: Retry-After ≈ 3600 s.
@@ -303,6 +308,12 @@ export function rateLimitRemaining(endpoint: string): number | undefined {
   return left
 }
 
+/**
+ * One JSON-RPC call. Protocol failures throw UcpError; a successful `result`
+ * is returned untouched (business messages inside it are NOT errors).
+ * HTTP 429 → wait `Retry-After` once when it is short, otherwise remember the
+ * block (circuit breaker above) and surface it.
+ */
 export async function rpc<T = unknown>(endpoint: string, method: string, params: unknown, attempt = 0): Promise<T> {
   const left = rateLimitRemaining(endpoint)
   if (left !== undefined) {
@@ -502,6 +513,14 @@ export async function callTool<T = Json>(
     trace.durationMs = Date.now() - started
     trace.response = maskPII(payload)
     const data = payload as Json
+    // MCP `isError: true` is a tool-level failure. If it still carries a UCP
+    // object (id / messages) keep it — business messages are handled by the
+    // analysis layer. A bare error text is a protocol-level failure.
+    const looksLikeUcp = data && typeof data === 'object' && ('id' in data || 'messages' in data || 'products' in data || 'product' in data)
+    if (isError && !looksLikeUcp) {
+      const text = typeof data?.text === 'string' ? data.text : JSON.stringify(data).slice(0, 300)
+      throw new UcpError({ kind: 'jsonrpc', message: `MCP araç hatası (isError): ${text}`, data })
+    }
     return { data: data as T, ucp: data?.ucp as UcpMeta | undefined, isError, trace, discovered: disc }
   } catch (e) {
     trace.durationMs = Date.now() - started

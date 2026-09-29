@@ -189,6 +189,16 @@ function ProductInner() {
               Satın al
             </button>
           </div>
+          {variant?.checkoutUrl && (
+            <p className="small" style={{ marginTop: 8 }}>
+              Yedek:{' '}
+              {/* Catalog's merchant-hosted buy-now link — no UCP checkout involved. */}
+              <a href={variant.checkoutUrl} target="_blank" rel="noopener noreferrer">
+                Mağazanın ödeme sayfasına doğrudan git (checkout_url) →
+              </a>{' '}
+              <span className="muted">UCP checkout’u oluşturulamazsa kullan; özet/kargo Kauna’da gösterilmez.</span>
+            </p>
+          )}
           {info && <div className="notice ok small">{info}</div>}
           {err && <div className="notice danger small">{err}</div>}
           {data?.notes?.map((n) => (

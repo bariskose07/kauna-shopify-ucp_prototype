@@ -3,6 +3,7 @@ import { useRouter, useSearchParams } from 'next/navigation'
 import { Suspense, useCallback, useEffect, useMemo, useState } from 'react'
 
 import { ApiFailure, api, formatMoney, pushClientLog } from '@/lib/browser'
+import type { ShippingEstimate } from '@/lib/estimate'
 import type { UiProduct, UiVariant } from '@/lib/ucp/catalog'
 
 interface ProductResp {
@@ -72,7 +73,69 @@ function ProductInner() {
     if (!isStorefront) void load(next)
   }
 
-  const sellerUrl = variant?.sellerDomain ? `https://${variant.sellerDomain}` : p?.via
+  // Route cart/checkout to the seller's API handle — never to the catalog.
+  const sellerDomain = variant?.sellerDomain ?? p?.sellerDomain
+  const sellerUrl = sellerDomain ? `https://${sellerDomain}` : undefined
+
+  // ── Shipping estimate in the background (no click, no redirect) ─────────
+  const [estimate, setEstimate] = useState<ShippingEstimate | null>(null)
+  const [estLoading, setEstLoading] = useState(false)
+  useEffect(() => {
+    if (!variant?.id || !sellerUrl || variant.available === false) return
+    let stale = false
+    setEstimate(null)
+    setEstLoading(true)
+    const t = setTimeout(() => {
+      api<ShippingEstimate>('/api/shipping-estimate', { body: { seller: sellerUrl, variantId: variant.id } })
+        .then((r) => !stale && setEstimate(r))
+        .catch((e) =>
+          !stale &&
+          setEstimate({ source: 'none', choices: [], destination: '', messages: [], notes: [e instanceof ApiFailure ? e.error.message : String(e)] }),
+        )
+        .finally(() => !stale && setEstLoading(false))
+    }, 400)
+    return () => {
+      stale = true
+      clearTimeout(t)
+    }
+  }, [variant?.id, variant?.available, sellerUrl])
+
+  // ── "Satın al": create the checkout with the saved buyer and open the
+  // merchant's pre-filled payment page straight away. The window is opened
+  // synchronously inside the click so popup blockers allow it, then pointed
+  // at continue_url once the checkout exists.
+  async function buyNow() {
+    if (!variant || !sellerUrl) return
+    const w = window.open('', '_blank')
+    if (w) {
+      try {
+        w.opener = null
+        w.document.write(
+          '<p style="font:16px system-ui;padding:24px">Mağazanın ödeme sayfası hazırlanıyor…<br><b style="color:#b3261e">TEST – “Pay now”a basma.</b></p>',
+        )
+      } catch {
+        /* ignore */
+      }
+    }
+    setBusy(true)
+    setErr(null)
+    try {
+      await api('/api/cart', { body: { action: 'add', seller: sellerUrl, variantId: variant.id, quantity: qty } })
+      const v = await api<{ continueUrl?: string }>('/api/checkout', { body: { seller: sellerUrl, includePhone: true } })
+      if (v.continueUrl) {
+        if (w && !w.closed) w.location.href = v.continueUrl
+        else window.open(v.continueUrl, '_blank', 'noopener')
+      } else {
+        w?.close()
+      }
+      // Kauna's own summary stays here: totals, messages, status check.
+      router.push(`/checkout?seller=${encodeURIComponent(sellerUrl)}`)
+    } catch (e) {
+      w?.close()
+      setErr(e instanceof ApiFailure ? `${e.error.message}${e.error.hint ? ` — ${e.error.hint}` : ''}` : String(e))
+      setBusy(false)
+    }
+  }
 
   async function add(goCheckout: boolean) {
     if (!variant || !sellerUrl) return
@@ -111,6 +174,33 @@ function ProductInner() {
             ) : null}
           </div>
           <div className="muted small">Para birimi: {variant?.price.currency ?? 'bilinmiyor (products.json)'}</div>
+
+          <div className="notice small" style={{ marginTop: 8 }}>
+            {estLoading && 'Kargo ücreti hesaplanıyor…'}
+            {!estLoading && estimate && (estimate.amount !== undefined || estimate.choices.some((c) => c.options.length)) && (
+              <>
+                <strong>
+                  Kargo{estimate.destination ? ` (${estimate.destination})` : ''}:{' '}
+                  {estimate.amount !== undefined ? formatMoney(estimate.amount, estimate.currency) : 'seçeneğe göre'}
+                </strong>
+                {estimate.choices.flatMap((c) => c.options).map((o) => (
+                  <div key={o.id}>
+                    {o.title ?? o.id}: {o.amount !== undefined ? formatMoney(o.amount, estimate.currency) : '—'}
+                    {o.estimate ? ` · ${o.estimate}` : ''}
+                  </div>
+                ))}
+                <div className="muted">
+                  Kaynak: {estimate.source === 'cart' ? 'sepet tahmini' : 'mağaza checkout’u'} · adres: kayıtlı / test adresi
+                </div>
+              </>
+            )}
+            {!estLoading && estimate && estimate.amount === undefined && !estimate.choices.some((c) => c.options.length) && (
+              <>
+                Kargo ödeme adımında hesaplanır.
+                {estimate.notes.length > 0 && <div className="muted">{estimate.notes.join(' · ')}</div>}
+              </>
+            )}
+          </div>
 
           {p.options.length > 0 &&
             p.options.map((o) => (
@@ -185,8 +275,8 @@ function ProductInner() {
             <button onClick={() => void add(false)} disabled={busy || !variant || variant.available === false}>
               Sepete ekle
             </button>
-            <button className="primary" onClick={() => void add(true)} disabled={busy || !variant || variant.available === false}>
-              Satın al
+            <button className="primary" onClick={() => void buyNow()} disabled={busy || !variant || !sellerUrl || variant.available === false}>
+              {busy ? 'Hazırlanıyor…' : 'Satın al'}
             </button>
           </div>
           {variant?.checkoutUrl && (

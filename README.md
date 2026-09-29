@@ -16,6 +16,12 @@ Birincil test mağazası **AAB** (`https://us.aabcollection.com`). Mariam yalnı
 
 ---
 
+### Ürün sayfası davranışı
+
+- **Kargo tahmini (tıklamasız):** Ürün sayfası açılınca ve varyant değişince, kayıtlı adres (yoksa test adresi Brooklyn, NY 11201) için kargo ücreti arka planda hesaplanır. Önce geçici bir sepetle denenir (mağazanın sepet şeması teslimat adresi kabul ediyorsa); olmazsa geçici bir checkout (create + update) açılır. Kullanıcının sepeti değişmez, hiçbir şey tamamlanmaz.
+- **Satın al:** Checkout, kayıtlı/test alıcı bilgileriyle oluşturulur ve mağazanın ödeme sayfası (`continue_url`) bilgiler dolu olarak **hemen yeni sekmede** açılır. Kauna'nın özet ekranı arka sekmede durum kontrolü için kalır. Açılır pencere engelleyicisine takılmamak için sekme tıklama anında boş olarak açılır, checkout hazır olunca adresi verilir.
+- **Yedek:** Catalog'un verdiği `checkout_url` (mağazanın buy-now bağlantısı) ürün sayfasında ayrıca listelenir.
+
 ## Kurulum ve çalıştırma
 
 Gereksinim: Node.js ≥ 22.14.

@@ -25,7 +25,8 @@ export async function POST(req: Request) {
   try {
     const v = await createCheckoutFlow(s, {
       seller: b.seller,
-      buyer: { ...DEFAULT_BUYER, ...(b.buyer ?? {}) },
+      // Saved buyer (from an earlier checkout) pre-fills the merchant page.
+      buyer: { ...DEFAULT_BUYER, ...(s.buyer ?? {}), ...(b.buyer ?? {}) },
       includePhone: b.includePhone ?? true,
       discountCodes: (b.discountCodes ?? []).filter(Boolean),
       scenario: b.scenario || undefined,

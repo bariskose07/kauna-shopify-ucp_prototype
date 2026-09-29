@@ -24,7 +24,11 @@ export function ProductCard({ p }: { p: UiProduct }) {
           {formatMoney(p.priceMin.amount, p.priceMin.currency)}{' '}
           <span className="muted small">{p.priceMin.currency ?? ''}</span>
         </div>
-        <div className="muted small mono">{v?.sellerDomain ?? '—'}</div>
+        {/* Brand storefront (seller.url) + API routing handle (seller.domain). */}
+        <div className="muted small">{p.sellerName ?? ''}</div>
+        <div className="muted small mono" style={{ wordBreak: 'break-all' }}>
+          {v?.sellerDomain ?? p.sellerDomain ?? '—'}
+        </div>
         <div className="row small" style={{ marginTop: 4 }}>
           {v?.nativeCheckout === false && <span className="badge warn">native_checkout: false</span>}
           {v?.nativeCheckout === true && <span className="badge ok">native_checkout</span>}

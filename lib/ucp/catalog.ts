@@ -48,6 +48,14 @@ export interface UiProduct {
   /** Business URL to call get_product against for this id. */
   via: string
   handle?: string
+  /**
+   * Seller routing handle for the whole product (first variant that has one,
+   * then product-level `seller`, then the PDP host). Search responses do not
+   * always carry `variants[].seller`, so cards and "Satın al" use this.
+   */
+  sellerDomain?: string
+  sellerName?: string
+  sellerUrl?: string
 }
 
 const US_CONTEXT = { address_country: 'US', currency: 'USD', language: 'en-US' }
@@ -66,10 +74,21 @@ function labelOf(v: unknown): string {
   return String(o.label ?? o.value ?? o.name ?? '')
 }
 
+function hostOf(u: unknown): string | undefined {
+  if (typeof u !== 'string' || !u) return undefined
+  try {
+    return new URL(u.startsWith('http') ? u : `https://${u}`).host
+  } catch {
+    return undefined
+  }
+}
+
 export function normalizeCatalogProduct(p: Json, source: UiProduct['source'], via: string): UiProduct {
+  // Product-level seller exists in some responses; variants win when present.
+  const pSeller = ((p.seller ?? (Array.isArray(p.sellers) ? p.sellers[0] : undefined)) ?? {}) as Json
   const variants = ((p.variants as Json[]) ?? []).map((v): UiVariant => {
     const availability = (v.availability ?? {}) as Json
-    const seller = (v.seller ?? {}) as Json
+    const seller = { ...pSeller, ...((v.seller ?? {}) as Json) } as Json
     const eligible = (v.eligible ?? {}) as Json
     const requires = (v.requires ?? {}) as Json
     const opts = (v.options ?? v.selected_options ?? v.selected ?? []) as unknown[]
@@ -119,6 +138,16 @@ export function normalizeCatalogProduct(p: Json, source: UiProduct['source'], vi
     priceMin: money(priceRange.min ?? variants[0]?.price),
     source,
     via,
+    ...(() => {
+      const withSeller = variants.find((v) => v.sellerDomain)
+      const sellerDomain =
+        withSeller?.sellerDomain ?? (pSeller.domain as string | undefined) ?? (source === 'global-catalog' ? hostOf(p.url) : hostOf(via))
+      return {
+        sellerDomain,
+        sellerName: withSeller?.sellerName ?? (pSeller.name as string | undefined),
+        sellerUrl: withSeller?.sellerUrl ?? (pSeller.url as string | undefined),
+      }
+    })(),
   }
 }
 
@@ -189,6 +218,8 @@ export function normalizeStorefrontProduct(p: StorefrontProduct, seller: string)
     source: 'storefront-products-json',
     via: seller,
     handle: p.handle,
+    sellerDomain: host,
+    sellerUrl: seller,
   }
 }
 

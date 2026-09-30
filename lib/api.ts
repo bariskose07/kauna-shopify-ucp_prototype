@@ -38,6 +38,8 @@ export async function logged<T>(
       seller,
       tool: r.trace.tool,
       endpoint: r.trace.endpoint,
+      auth: r.trace.auth,
+      surface: r.trace.surface,
       durationMs: r.trace.durationMs,
       request: r.trace.request,
       // Rule 3: catalog responses are not kept on the server.
@@ -51,6 +53,8 @@ export async function logged<T>(
       seller,
       tool: t?.tool ?? 'unknown',
       endpoint: t?.endpoint,
+      auth: t?.auth,
+      surface: t?.surface,
       durationMs: t?.durationMs,
       request: t?.request,
       validation: t?.validation,

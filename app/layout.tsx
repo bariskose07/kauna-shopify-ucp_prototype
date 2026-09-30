@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from 'next'
 
+import { AuthStatus } from '@/components/AuthStatus'
 import { Header } from '@/components/Header'
 
 import './globals.css'
@@ -30,6 +31,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             TEST – Ödemeyi tamamlama, gerçek sipariş verilir. Mağaza sayfasında “Pay now / Siparişi tamamla”ya basma.
           </div>
           <Header />
+          <AuthStatus />
         </div>
         <main>{children}</main>
       </body>

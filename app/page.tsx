@@ -47,7 +47,7 @@ function SearchInner() {
     try {
       const r =
         t === 'lookup'
-          ? await api<SearchResp>('/api/catalog/lookup', { body: { ids: idList.split(/[\s,]+/).filter(Boolean) } })
+          ? await api<SearchResp>('/api/catalog/lookup', { body: { ids: idList.split(/[\s,]+/).filter(Boolean), seller: sel || undefined } })
           : await api<SearchResp>('/api/catalog/search', { body: { query: q, seller: t === 'seller' ? sel : undefined } })
       pushClientLog({ tool: `catalog:${t}`, payload: r.traces })
       setRes(r)
@@ -71,7 +71,7 @@ function SearchInner() {
     const sp = new URLSearchParams({ tab })
     if (tab === 'lookup') sp.set('ids', ids)
     else sp.set('q', query)
-    if (tab === 'seller') sp.set('seller', seller)
+    if (tab !== 'global') sp.set('seller', seller)
     router.replace(`/?${sp.toString()}`, { scroll: false })
     void run(tab, query, seller, ids)
   }
@@ -111,9 +111,9 @@ function SearchInner() {
             submit()
           }}
         >
-          {tab === 'seller' && (
+          {(tab === 'seller' || tab === 'lookup') && (
             <div className="field">
-              <label htmlFor="seller">Mağaza alan adı</label>
+              <label htmlFor="seller">{tab === 'lookup' ? 'Mağaza (Global Catalog’da bulunamazsa burada aranır)' : 'Mağaza alan adı'}</label>
               <input id="seller" value={seller} onChange={(e) => setSeller(e.target.value)} placeholder="us.aabcollection.com" />
             </div>
           )}

@@ -119,9 +119,21 @@ export default function DebugPage() {
               <span className="mono">{e.at.slice(11, 19)}</span> <strong>{e.tool}</strong>{' '}
               {e.seller && <span className="muted">{e.seller.replace('https://', '')}</span>}{' '}
               {e.durationMs !== undefined && <span className="muted">{e.durationMs} ms</span>}{' '}
+              {e.auth && (
+                <span className={`badge ${e.auth.mode === 'token' ? 'ok' : ''}`} title={e.auth.note ?? ''}>
+                  {{ token: 'token', signed: 'imzalı', anonymous: 'anonim', cli: 'CLI yedeği' }[e.auth.mode] ?? e.auth.mode}
+                </span>
+              )}{' '}
               {e.error ? <span className="badge danger">hata</span> : null}
             </summary>
             {e.endpoint && <div className="mono">{e.endpoint}</div>}
+            {e.auth && (
+              <div>
+                Kimlik yolu: <b>{e.auth.mode}</b>
+                {e.surface ? ` · yüzey: ${e.surface}` : ''}
+                {e.auth.note ? ` · ${e.auth.note}` : ''}
+              </div>
+            )}
             {e.notes?.map((n) => <div key={n}>{n}</div>)}
             <div>İstek:</div>
             <pre>{JSON.stringify(e.request ?? null, null, 2)}</pre>

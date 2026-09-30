@@ -135,7 +135,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 
 /* segmented control (search modes) */
 .seg { display: flex; width: 100%; max-width: 460px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 999px; padding: 3px; gap: 2px; }
-.seg button { flex: 1; border: none; background: transparent; padding: 7px 8px; font-size: 14px; white-space: nowrap; }
+.seg button { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; border: none; background: transparent; padding: 7px 8px; font-size: 14px; white-space: nowrap; }
 @media (max-width: 380px) { .seg button { font-size: 13px; padding: 7px 4px; } }
 .seg button.on { background: var(--surface); box-shadow: var(--shadow); color: var(--accent); font-weight: 600; }
 
@@ -235,3 +235,24 @@ details.card[open] > summary::after { content: '－'; }
 @keyframes sk { to { background-position: -200% 0; } }
 @media (prefers-reduced-motion: reduce) { .skeleton { animation: none; } .product-card, .product-card img { transition: none; } }
 .empty { text-align: center; padding: 40px 16px; color: var(--muted); }
+
+/* ── identity / surface indicator (under the header) ────────────────────── */
+.authbar { background: var(--surface-2); border-bottom: 1px solid var(--line); font-size: 12px; }
+.authbar-row {
+  all: unset; box-sizing: border-box; cursor: pointer; display: flex; flex-wrap: nowrap; gap: 6px; align-items: center;
+  max-width: 1080px; margin: 0 auto; padding: 5px 16px; width: 100%; overflow-x: auto; white-space: nowrap; color: var(--muted);
+  scrollbar-width: none;
+}
+.authbar-row::-webkit-scrollbar { display: none; }
+.authbar-item { display: inline-flex; align-items: center; gap: 4px; }
+.authbar .sep { margin-right: 4px; }
+.authbar .mode { color: var(--text); font-weight: 600; }
+.authbar .mode.token { color: var(--ok-line); }
+.authbar .mode.cli { color: var(--info-line); }
+.authbar .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; background: var(--line-strong); }
+.authbar .dot.good { background: var(--ok-line); }
+.authbar .dot.bad { background: var(--danger-line); }
+.authbar .dot.warn { background: var(--warn-line); }
+.authbar .rl { color: var(--text); }
+.authbar .bad-text { color: var(--danger-line); font-weight: 600; }
+.authbar-details { max-width: 1080px; margin: 0 auto; padding: 4px 16px 10px; display: grid; gap: 4px; color: var(--text); max-height: 40vh; overflow-y: auto; }

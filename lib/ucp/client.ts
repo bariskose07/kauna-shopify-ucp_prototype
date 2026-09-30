@@ -99,10 +99,22 @@ async function fetchToken(id: string, secret: string): Promise<string | undefine
     // Network failure, not bad credentials.
     throw new UcpError({ kind: 'network', message: `api.shopify.com token isteğine ulaşılamadı: ${(e as Error).message}` })
   }
-  const body = (await res.json().catch(() => ({}))) as { access_token?: string; expires_in?: number }
+  const body = (await res.json().catch(() => ({}))) as {
+    access_token?: string
+    expires_in?: number
+    error?: string
+    error_description?: string
+    message?: string
+  }
   if (!res.ok || !body.access_token) {
-    // Never echo the response body: it may contain the credentials' context.
-    throw new UcpError({ kind: 'auth', httpStatus: res.status, message: `Token alınamadı (HTTP ${res.status})` })
+    // Only the standard OAuth error fields are surfaced — never the request
+    // or anything credential-like.
+    const why = [body.error, body.error_description ?? body.message].filter(Boolean).join(': ')
+    throw new UcpError({
+      kind: 'auth',
+      httpStatus: res.status,
+      message: `Token alınamadı (HTTP ${res.status})${why ? ` — ${why.slice(0, 200)}` : ''}`,
+    })
   }
   g.__ucpToken = {
     token: body.access_token,
@@ -285,10 +297,114 @@ export function shouldSendToken(endpoint: string): boolean {
   return new URL(endpoint).origin === new URL(config().catalogUrl).origin
 }
 
-async function authHeaders(endpoint: string): Promise<Record<string, string>> {
-  if (!shouldSendToken(endpoint)) return {}
-  const token = await getAccessToken()
-  return token ? { Authorization: `Bearer ${token}` } : {}
+/**
+ * How a request identified itself (Shopify's tiers):
+ *   token     — Authorization: Bearer <Dev Dashboard JWT>
+ *   signed    — RFC 9421 HTTP Message Signature (NOT implemented; ucp-cli
+ *               0.9.0 does not sign either)
+ *   anonymous — agent profile URL in meta["ucp-agent"] only
+ *   cli       — delegated to @shopify/ucp-cli (which is anonymous today)
+ */
+export type AuthMode = 'token' | 'signed' | 'anonymous' | 'cli'
+export interface AuthInfo {
+  mode: AuthMode
+  /** Why this mode (e.g. "token alınamadı → anonim", "mağazaya token gönderilmez"). */
+  note?: string
+}
+
+export interface TokenState {
+  configured: boolean
+  status: 'not-configured' | 'not-requested' | 'ok' | 'failed'
+  expiresAt?: number
+  error?: { at: number; message: string; httpStatus?: number }
+}
+const tokenState: { error?: TokenState['error'] } = ((globalThis as unknown as { __ucpTokenState?: { error?: TokenState['error'] } }).__ucpTokenState ??= {})
+
+export function getTokenState(): TokenState {
+  const configured = config().hasClientCredentials
+  if (!configured) return { configured, status: 'not-configured' }
+  if (g.__ucpToken && g.__ucpToken.expiresAt > Date.now()) return { configured, status: 'ok', expiresAt: g.__ucpToken.expiresAt }
+  if (tokenState.error) return { configured, status: 'failed', error: tokenState.error }
+  return { configured, status: 'not-requested' }
+}
+
+async function authFor(endpoint: string): Promise<{ headers: Record<string, string>; info: AuthInfo }> {
+  if (!shouldSendToken(endpoint)) {
+    return {
+      headers: {},
+      info: { mode: 'anonymous', note: config().hasClientCredentials ? 'mağazaya token gönderilmez (AuthenticationFailed)' : undefined },
+    }
+  }
+  if (!config().hasClientCredentials) return { headers: {}, info: { mode: 'anonymous', note: 'SHOPIFY_CLIENT_ID/SECRET yok' } }
+  // After a failure, don't hammer api.shopify.com on every request: retry
+  // the token at most once a minute, stay anonymous in between.
+  const TOKEN_RETRY_MS = 60_000
+  if (tokenState.error && Date.now() - tokenState.error.at < TOKEN_RETRY_MS && !g.__ucpToken) {
+    return { headers: {}, info: { mode: 'anonymous', note: `token alınamadı → anonim: ${tokenState.error.message}` } }
+  }
+  try {
+    const token = await getAccessToken()
+    tokenState.error = undefined
+    return token ? { headers: { Authorization: `Bearer ${token}` }, info: { mode: 'token' } } : { headers: {}, info: { mode: 'anonymous' } }
+  } catch (e) {
+    // Catalog still works anonymously (lowest tier) — degrade, but loudly.
+    const err = e as UcpError
+    tokenState.error = { at: Date.now(), message: err.message, httpStatus: err.httpStatus }
+    console.warn(`[ucp] token isteği başarısız → anonim devam: ${err.message}`)
+    return { headers: {}, info: { mode: 'anonymous', note: `token alınamadı → anonim: ${err.message}` } }
+  }
+}
+
+// ─── per-surface status (for the top-bar indicator) ─────────────────────────
+
+export type Surface = 'global-catalog' | 'merchant-catalog' | 'cart' | 'checkout'
+export interface SurfaceStatus {
+  surface: Surface
+  auth: AuthInfo
+  at: number
+  host: string
+  endpoint: string
+  tool: string
+  ok: boolean
+  error?: string
+  retryAfterSeconds?: number
+}
+const surfaceStatus: Map<Surface, SurfaceStatus> = ((globalThis as unknown as { __ucpSurface?: Map<Surface, SurfaceStatus> }).__ucpSurface ??= new Map())
+
+export function surfaceOf(endpoint: string, tool: string): Surface {
+  if (new URL(endpoint).origin === new URL(config().catalogUrl).origin) return 'global-catalog'
+  if (tool.includes('checkout')) return 'checkout'
+  if (tool.includes('cart')) return 'cart'
+  return 'merchant-catalog'
+}
+
+export function getSurfaceStatus(): SurfaceStatus[] {
+  return [...surfaceStatus.values()]
+}
+
+export function recordSurface(endpoint: string, tool: string, auth: AuthInfo, ok: boolean, err?: UcpError, ms?: number) {
+  const surface = surfaceOf(endpoint, tool)
+  const host = new URL(endpoint).host
+  surfaceStatus.set(surface, {
+    surface,
+    auth,
+    at: Date.now(),
+    host,
+    endpoint,
+    tool,
+    ok,
+    error: err ? `${err.kind}: ${err.message}`.slice(0, 240) : undefined,
+    retryAfterSeconds: err?.retryAfterSeconds,
+  })
+  // Server log line — one per UCP request (no payloads, no PII).
+  const line = `[ucp] ${tool} → ${host} surface=${surface} auth=${auth.mode}${auth.note ? ` (${auth.note})` : ''} ${ok ? 'ok' : `ERR ${err?.kind}${err?.rpcCode !== undefined ? ` ${err.rpcCode}` : ''}${err?.httpStatus ? ` http=${err.httpStatus}` : ''}`}${ms !== undefined ? ` ${ms}ms` : ''}`
+  if (ok) console.info(line)
+  else console.warn(line)
+}
+
+/** Filled in by rpc() so callers can attribute the request. */
+export interface RpcInfo {
+  auth?: AuthInfo
 }
 
 // Endpoint → epoch ms until which the business asked us to back off (429).
@@ -314,7 +430,13 @@ export function rateLimitRemaining(endpoint: string): number | undefined {
  * HTTP 429 → wait `Retry-After` once when it is short, otherwise remember the
  * block (circuit breaker above) and surface it.
  */
-export async function rpc<T = unknown>(endpoint: string, method: string, params: unknown, attempt = 0): Promise<T> {
+export async function rpc<T = unknown>(
+  endpoint: string,
+  method: string,
+  params: unknown,
+  attempt = 0,
+  info: RpcInfo = {},
+): Promise<T> {
   const left = rateLimitRemaining(endpoint)
   if (left !== undefined) {
     throw new UcpError({
@@ -325,6 +447,8 @@ export async function rpc<T = unknown>(endpoint: string, method: string, params:
     })
   }
   const id = rpcId++
+  const auth = await authFor(endpoint)
+  info.auth = auth.info
   let res: Response
   try {
     res = await fetch(endpoint, {
@@ -333,7 +457,7 @@ export async function rpc<T = unknown>(endpoint: string, method: string, params:
         'Content-Type': 'application/json',
         Accept: 'application/json',
         'User-Agent': USER_AGENT,
-        ...(await authHeaders(endpoint)),
+        ...auth.headers,
       },
       body: JSON.stringify({ jsonrpc: '2.0', id, method, params }),
       signal: AbortSignal.timeout(TIMEOUT_MS),
@@ -348,7 +472,7 @@ export async function rpc<T = unknown>(endpoint: string, method: string, params:
     const max = config().maxRetryAfter
     if (attempt === 0 && wait !== undefined && wait <= max) {
       await new Promise((r) => setTimeout(r, wait * 1000))
-      return rpc<T>(endpoint, method, params, attempt + 1)
+      return rpc<T>(endpoint, method, params, attempt + 1, info)
     }
     if (wait !== undefined) blockedUntil.set(endpoint, Date.now() + wait * 1000)
     throw new UcpError({
@@ -371,6 +495,19 @@ export async function rpc<T = unknown>(endpoint: string, method: string, params:
     })
   }
   if (body.error) {
+    // UCP: MCP servers SHOULD put the back-off in error.data.retry_after.
+    const data = (body.error.data ?? {}) as { retry_after?: unknown }
+    const ra = typeof data.retry_after === 'number' ? data.retry_after : typeof data.retry_after === 'string' ? parseRetryAfter(data.retry_after) : undefined
+    if (ra !== undefined) {
+      blockedUntil.set(endpoint, Date.now() + ra * 1000)
+      throw new UcpError({
+        kind: 'rate_limited',
+        rpcCode: body.error.code,
+        retryAfterSeconds: ra,
+        message: `Hız limiti (JSON-RPC ${body.error.code}: ${body.error.message}). ${ra} sn sonra tekrar deneyin.`,
+        data: body.error.data,
+      })
+    }
     throw new UcpError({
       kind: 'jsonrpc',
       rpcCode: body.error.code,
@@ -392,9 +529,20 @@ export async function listTools(disc: Discovered, force = false): Promise<Record
   const key = `${disc.endpoint}|${disc.agentProfileUrl}`
   const hit = toolsCache.get(key)
   if (!force && hit && Date.now() - hit.at < TOOLS_TTL_MS) return hit.value
-  const result = await rpc<{ tools?: ToolDescriptor[] }>(disc.endpoint, 'tools/list', {
-    arguments: { meta: { 'ucp-agent': { profile: disc.agentProfileUrl } } },
-  })
+  const info: RpcInfo = {}
+  let result: { tools?: ToolDescriptor[] }
+  try {
+    result = await rpc<{ tools?: ToolDescriptor[] }>(
+      disc.endpoint,
+      'tools/list',
+      { arguments: { meta: { 'ucp-agent': { profile: disc.agentProfileUrl } } } },
+      0,
+      info,
+    )
+  } catch (e) {
+    if (e instanceof UcpError) recordSurface(disc.endpoint, 'tools/list', info.auth ?? { mode: 'anonymous' }, false, e)
+    throw e
+  }
   const tools: Record<string, ToolDescriptor> = {}
   for (const t of result.tools ?? []) tools[t.name] = t
   toolsCache.set(key, { at: Date.now(), value: tools })
@@ -414,6 +562,9 @@ export interface CallTrace {
   response?: unknown
   error?: unknown
   validation?: ValidationReport
+  /** Which identity tier this request used. */
+  auth?: AuthInfo
+  surface?: Surface
 }
 
 export interface CallResult<T = Json> {
@@ -507,8 +658,11 @@ export async function callTool<T = Json>(
   }
 
   const started = Date.now()
+  const info: RpcInfo = {}
+  trace.surface = surfaceOf(disc.endpoint, toolName)
   try {
-    const raw = await rpc(disc.endpoint, 'tools/call', { name: toolName, arguments: wireArgs })
+    const raw = await rpc(disc.endpoint, 'tools/call', { name: toolName, arguments: wireArgs }, 0, info)
+    trace.auth = info.auth
     const { payload, isError } = unwrapToolResult(raw)
     trace.durationMs = Date.now() - started
     trace.response = maskPII(payload)
@@ -521,10 +675,13 @@ export async function callTool<T = Json>(
       const text = typeof data?.text === 'string' ? data.text : JSON.stringify(data).slice(0, 300)
       throw new UcpError({ kind: 'jsonrpc', message: `MCP araç hatası (isError): ${text}`, data })
     }
+    recordSurface(disc.endpoint, toolName, info.auth ?? { mode: 'anonymous' }, true, undefined, trace.durationMs)
     return { data: data as T, ucp: data?.ucp as UcpMeta | undefined, isError, trace, discovered: disc }
   } catch (e) {
     trace.durationMs = Date.now() - started
+    trace.auth = info.auth ?? { mode: 'anonymous' }
     trace.error = e instanceof UcpError ? e.toJSON() : { message: (e as Error).message }
+    if (e instanceof UcpError) recordSurface(disc.endpoint, toolName, trace.auth, false, e, trace.durationMs)
     if (e instanceof UcpError) e.details = { ...(e.details as Json), trace }
     throw e
   }

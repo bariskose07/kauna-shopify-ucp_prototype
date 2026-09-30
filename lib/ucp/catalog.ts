@@ -353,6 +353,144 @@ export async function lookup(ids: string[], via?: string): Promise<CatalogResult
   return { data: products, traces: [res.trace], dropped, messages: (res.data.messages as unknown[]) ?? [], notes: [] }
 }
 
+// ─── "Kimlik / URL ile" — resilient lookup ─────────────────────────────────
+//
+// Seen live: a merchant-local variant GID (gid://shopify/ProductVariant/…)
+// or a storefront URL may not resolve in the *global* catalog. So each input
+// goes through a ladder and every step is reported per id:
+//   1. global lookup_catalog (all ids at once)
+//   2. unresolved → the seller's own lookup_catalog (seller from the URL, or
+//      the seller field in the UI)
+//   3. unresolved product URLs → the storefront's /products/<handle>.json
+
+interface ParsedId {
+  raw: string
+  kind: 'variant' | 'product' | 'upid' | 'url' | 'other'
+  /** Store origin for URLs. */
+  origin?: string
+  handle?: string
+  numeric?: string
+}
+
+export function parseLookupId(raw: string): ParsedId {
+  const t = raw.trim()
+  if (/^\d+$/.test(t)) return { raw: `gid://shopify/ProductVariant/${t}`, kind: 'variant', numeric: t }
+  if (/^gid:\/\/shopify\/p\//.test(t)) return { raw: t, kind: 'upid' }
+  const v = /^gid:\/\/shopify\/ProductVariant\/(\d+)/.exec(t)
+  if (v) return { raw: t, kind: 'variant', numeric: v[1] }
+  const pr = /^gid:\/\/shopify\/Product\/(\d+)/.exec(t)
+  if (pr) return { raw: t, kind: 'product', numeric: pr[1] }
+  if (/^https?:\/\//i.test(t) || /^[\w.-]+\.[a-z]{2,}\//i.test(t)) {
+    try {
+      const u = new URL(/^https?:/i.test(t) ? t : `https://${t}`)
+      const handle = /\/products\/([^/?#]+)/.exec(u.pathname)?.[1]
+      const variant = u.searchParams.get('variant') ?? undefined
+      return { raw: `${u.origin}${u.pathname}${variant ? `?variant=${variant}` : ''}`, kind: 'url', origin: u.origin, handle, numeric: variant }
+    } catch {
+      /* fall through */
+    }
+  }
+  return { raw: t, kind: 'other' }
+}
+
+/** Does this product answer the given input? (ids compared without ?shop= suffixes) */
+function matches(p: UiProduct, id: ParsedId): boolean {
+  const strip = (x: string) => x.split('?')[0]
+  const ids = new Set([strip(p.id), ...p.variants.map((v) => strip(v.id))])
+  if (ids.has(strip(id.raw))) return true
+  if (id.numeric && p.variants.some((v) => strip(v.id).endsWith(`/${id.numeric}`))) return true
+  if (id.handle && [p.url, ...p.variants.map((v) => v.url)].some((u) => u?.includes(`/products/${id.handle}`))) return true
+  return false
+}
+
+export interface LookupReport {
+  input: string
+  found: boolean
+  via?: 'global-catalog' | 'seller-catalog' | 'storefront-products-json'
+  notes: string[]
+}
+
+export async function lookupSmart(
+  inputs: string[],
+  sellerHint?: string,
+): Promise<CatalogResult<UiProduct[]> & { report: LookupReport[] }> {
+  const parsed = inputs.map(parseLookupId).filter((p) => p.raw)
+  const report = new Map<string, LookupReport>(parsed.map((p) => [p.raw, { input: p.raw, found: false, notes: [] }]))
+  const found: UiProduct[] = []
+  const traces: CallTrace[] = []
+  const messages: unknown[] = []
+  let dropped: UnknownField[] = []
+  const pending = () => parsed.filter((p) => !report.get(p.raw)?.found)
+  const settle = (products: UiProduct[], via: LookupReport['via']) => {
+    for (const p of pending()) {
+      const hit = products.find((x) => matches(x, p))
+      if (hit) {
+        const r = report.get(p.raw) as LookupReport
+        r.found = true
+        r.via = via
+        if (!found.some((f) => f.id === hit.id && f.via === hit.via)) found.push(hit)
+      }
+    }
+  }
+  const traceOf = (e: unknown) => (isUcpError(e) && e.details && typeof e.details === 'object' ? (e.details as { trace?: CallTrace }).trace : undefined)
+
+  // 1. global
+  try {
+    const g = await lookup(parsed.map((p) => p.raw))
+    traces.push(...g.traces)
+    messages.push(...g.messages)
+    dropped = g.dropped
+    settle(g.data, 'global-catalog')
+    for (const p of pending()) report.get(p.raw)?.notes.push('Global Catalog’da bulunamadı')
+  } catch (e) {
+    const t = traceOf(e)
+    if (t) traces.push(t)
+    for (const p of parsed) report.get(p.raw)?.notes.push(`Global Catalog hatası: ${(e as Error).message}`)
+  }
+
+  // 2. seller-scoped lookup (per store origin)
+  const bySeller = new Map<string, ParsedId[]>()
+  for (const p of pending()) {
+    const origin = p.origin ?? (sellerHint ? sellerHint.replace(/\/$/, '') : undefined)
+    if (!origin) {
+      report.get(p.raw)?.notes.push('Mağaza bilinmiyor — “Mağaza” alanını doldurun')
+      continue
+    }
+    bySeller.set(origin, [...(bySeller.get(origin) ?? []), p])
+  }
+  for (const [origin, list] of bySeller) {
+    try {
+      const r = await lookup(list.map((p) => p.raw), origin)
+      traces.push(...r.traces)
+      messages.push(...r.messages)
+      settle(r.data, 'seller-catalog')
+      for (const p of list) if (!report.get(p.raw)?.found) report.get(p.raw)?.notes.push(`${new URL(origin).host} kataloğunda bulunamadı`)
+    } catch (e) {
+      const t = traceOf(e)
+      if (t) traces.push(t)
+      for (const p of list) report.get(p.raw)?.notes.push(`${new URL(origin).host} katalog hatası: ${(e as Error).message}`)
+    }
+  }
+
+  // 3. storefront JSON for product URLs
+  for (const p of pending()) {
+    if (!p.origin || !p.handle) continue
+    try {
+      const sf = await storefrontProduct(p.origin, p.handle)
+      found.push(sf)
+      const r = report.get(p.raw) as LookupReport
+      r.found = true
+      r.via = 'storefront-products-json'
+    } catch (e) {
+      report.get(p.raw)?.notes.push(`products.json: ${(e as Error).message}`)
+    }
+  }
+
+  const reportList = [...report.values()]
+  const notes = reportList.map((r) => (r.found ? `✓ ${r.input} → ${r.via}` : `✗ ${r.input}: ${r.notes.join(' · ')}`))
+  return { data: found, traces, dropped, messages, notes, report: reportList }
+}
+
 /** get_product with optional option selection (copy labels verbatim). */
 export async function getProduct(
   id: string,

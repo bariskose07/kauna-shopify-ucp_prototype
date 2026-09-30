@@ -121,7 +121,37 @@ Kaynak yeniden tarandı (`@shopify/ucp-cli` 0.9.0 `cli/cta.ts`, `core/escalation
 
 Uçtan uca test (sahte mağaza, Playwright; mobil 390×844 açık tema + masaüstü 1280 koyu tema): arama, satıcı gösterimi, geri dönüş, varyant seçimi, tıklamasız kargo tahmini, Satın al → ödeme sayfası (UTM'li), checkout yeniden kullanımı, adet koruması, geçersiz/geçerli indirim, kargo seçeneği, senaryo 1/2, durum kontrolü, sepet sayacı, PII maskesi, bulgu tablosu, mod A hazırlığı, yatay taşma ve sayfa hataları → **56/56 geçti**. Birim testleri 31/31.
 
-## 10. Sonraki adımlar (kendi makinenizde)
+## 10. Kimlik katmanları ve hız limitleri (Kauna canlıya geçerken)
+
+Kaynaklar: [Auth and rate limiting](https://shopify.dev/docs/agents/profiles/auth-and-rate-limiting), [Authenticate your agent](https://shopify.dev/docs/agents/get-started/authentication), [Checkout MCP](https://shopify.dev/docs/agents/carts-and-checkout/checkout-mcp), [Cart MCP](https://shopify.dev/docs/agents/carts-and-checkout/cart-mcp), [UCP overview](http://ucp.dev/2026-04-08/specification/overview/), Shopify Developer Community: [Checkout MCP authentication issue](https://community.shopify.dev/t/checkout-mcp-authentication-issue/37604), [Missing required buyer IP header](https://community.shopify.dev/t/checkout-mcp-create-checkout-fails-with-missing-required-buyer-ip-header-despite-following-official-demo/33939). Sayfalar bu ortamdan açılamadı; içerik arama özetlerinden alındı ve **birebir doğrulanmadı**.
+
+**Shopify ajan trafiğini üç katmana ayırıyor; limitler katmana göre değişiyor:**
+
+| Katman | Nasıl | Erişim | Limit |
+| --- | --- | --- | --- |
+| Token | `Authorization: Bearer <JWT>` (Dev Dashboard client credentials, 60 dk) | Catalog, sepet, checkout, sipariş; `complete_checkout` yalnızca izin verilmiş token'la; `get_order` için `read_global_api_orders` kapsamı | En yüksek |
+| İmzalı | RFC 9421 HTTP Message Signatures (ECDSA P-256); açık anahtar ajanın `/.well-known/ucp` profilinde | Sepet ve checkout | Orta |
+| Anonim | Yalnızca `meta["ucp-agent"].profile` | Catalog, sepet, checkout oluşturma/düzenleme; `complete_checkout` ve sipariş araçları yok | En düşük |
+
+- Her katmanda **Checkout MCP, Cart MCP'den daha sıkı** sınırlanıyor. Öneri: yinelemeler sepette, checkout yalnızca satın almaya hazır alıcı için.
+- Sayısal limitler (dakika/saat başına istek) dokümanda **yayınlanmamış**. Gözlenen: anonim checkout'ta kısa bir denemeden sonra `HTTP 429`, `Retry-After: 3588` (≈ 1 saat).
+- 429'da `Retry-After` başlığına (REST) veya `error.data.retry_after` alanına (MCP) uyulmalı. İkisi de artık uygulanıyor, süre dolana kadar o uç noktaya istek gönderilmiyor.
+
+**Bu prototipteki durum (canlı gözlem):**
+- Dev Dashboard token'ı (kapsamlar: `read_global_api_catalog_search`, `write_global_api_app_events`) **Global Catalog'da çalışıyor**.
+- Aynı token mağazanın Checkout/Cart MCP'sine gönderilince `-32000 AuthenticationFailed` dönüyor. Forumda aynı sorunu yaşayan başka geliştiriciler var; token olmadan istek çalışıyor. Yani bugün sepet ve checkout **anonim katmanda** çalışıyor.
+- İmzalı katman uygulanmadı; ucp-cli 0.9.0 da imzalamıyor.
+
+**Kauna canlıya geçtiğinde ne değişir (öneri ve açık sorular):**
+1. **Anonim katman canlı için yetersiz.** Tüm Kauna kullanıcılarının istekleri aynı sunucudan çıkacağından anonim kotayı büyük olasılıkla birlikte tüketirler. Tek kullanıcılı testte bile ≈1 saatlik 429 alındı. Limitin IP'ye mi, ajan profiline mi yoksa ikisine birden mi bağlı olduğu yayınlanmamış.
+2. **Kauna adına ayrı kimlik:** Dev Dashboard'da Kauna organizasyonu altında uygulama/katalog anahtarı, Kauna alan adında barındırılan ajan profili (ör. `https://kauna.ai/.well-known/ucp`). Kişisel dev hesabı yerine bu kullanılmalı. `UCP_AGENT_PROFILE_URL` bunu destekliyor.
+3. **Checkout için Token katmanına erişim** şu an dev token'ıyla çalışmıyor. Shopify'dan (partner/agentic commerce ekibi) Kauna token'ının checkout/cart için yetkilendirilmesi istenmeli. Alternatif olarak **İmzalı katman**: bir anahtar çifti, Kauna profilinde açık anahtar, her isteğin RFC 9421 ile imzalanması. Forumda imzalı isteklerde `key_not_found` sorunu bildirilmiş; olgunluğu belirsiz.
+4. Token katmanında checkout için alıcı IP'si istenebiliyor (forumda "Missing required buyer IP header"). Kauna sunucusu alıcının IP'sini `signals` (ör. `dev.ucp.buyer_ip`) ile iletmeli. Tam alan adı canlı şemadan doğrulanmalı.
+5. Sayısal limitler ve katman yükseltme süreci Shopify'a sorulmalı: dakika/saat başına istek, mağaza başına mı toplam mı, 429 pencere süresi.
+
+**Uygulamada görünürlük:** Her UCP isteğinin kimlik yolu (token / imzalı / anonim / CLI yedeği) hata ayıklama panelinde rozet olarak ve sunucu logunda `[ucp] <araç> → <host> surface=… auth=…` satırı olarak görünüyor. Üst çubukta yüzey başına gösterge var (Global Catalog · Mağaza katalog · Sepet · Checkout). Token başarısız olursa nedeni gösteriliyor ve Global Catalog anonim devam ediyor; token en fazla dakikada bir yeniden deneniyor.
+
+## 11. Sonraki adımlar (kendi makinenizde)
 
 1. `npm run dev` → Hata ayıklama → Mağaza keşfi: `us.aabcollection.com`. `checkoutSchemaFacts.phonePlacement`, `attribution`, `supportsDiscounts` ve `supportsCartId` değerlerini bu dosyaya işleyin.
 2. Senaryoları 1→8 sırasıyla çalıştırın ve "Bulguları kopyala" çıktısını bu dosyaya ekleyin.

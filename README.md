@@ -108,6 +108,10 @@ tests/                  Birim testleri
 | 5. Sırlar yalnızca `.env` | Sunucu tarafı `process.env`; token yanıt gövdesi hiçbir yere yazılmaz |
 | 6. Kullanıcı verisi bellekte | `lib/session.ts` — `globalThis` üzerindeki `Map`, 2 saatlik TTL, httpOnly çerez |
 
+### Kimlik yolu göstergesi
+
+Üst çubukta her yüzey için o anki kimlik yolu ve son durum görünür: `Global Catalog: token · Mağaza katalog: anonim · Sepet: anonim · Checkout: anonim`. Yeşil nokta son isteğin başarılı olduğunu, kırmızı hatalı olduğunu, ⏳ hız limitini (kalan dakika) gösterir. Tıklayınca ayrıntılar açılır: token durumu ve başarısızlık nedeni, imzalı katman durumu, yüzey başına son istek. Aynı bilgi hata ayıklama panelinde her kayıtta rozet olarak, sunucu terminalinde `[ucp] …` satırları olarak da yer alır. Token alınamazsa Global Catalog anonim devam eder (dakikada bir yeniden denenir). Limitler için bkz. FINDINGS.md §10.
+
 ### Hata ayrımı
 
 - **Protokol hataları** (`UcpError`): JSON-RPC `error` (ör. `-32000`, `-32001`), HTTP 401/403/5xx, ağ hatası, keşif hatası. İstek işlenmemiştir. **429** → `Retry-After` kısa ise bir kez beklenir, değilse arayüze "N sn sonra deneyin" olarak taşınır.

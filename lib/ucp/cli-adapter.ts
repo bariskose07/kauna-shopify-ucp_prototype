@@ -10,7 +10,7 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 
 import { maskPII } from '../mask'
-import type { CallResult, Discovered } from './client'
+import { recordSurface, surfaceOf, type CallResult, type Discovered } from './client'
 import { UcpError } from './errors'
 import type { Json } from './types'
 
@@ -79,7 +79,15 @@ export async function callToolViaCli<T>(business: string, toolName: string, wire
   if (Object.keys(body).length > 0) args.push('--input', JSON.stringify(body))
 
   const started = Date.now()
-  const env = await ucp(args)
+  const auth = { mode: 'cli' as const, note: 'ucp-cli (agent profili, imzasız)' }
+  let env: Json
+  try {
+    env = await ucp(args)
+  } catch (e) {
+    recordSurface(business.startsWith('http') ? business : `https://${business}`, toolName, auth, false, e as UcpError)
+    throw e
+  }
+  recordSurface(business.startsWith('http') ? business : `https://${business}`, toolName, auth, true, undefined, Date.now() - started)
   // Default JSON output: { business, endpoint, transport, ucp, result, cta }.
   const result = (env.result ?? env) as Json
   const data = { ucp: env.ucp, ...result } as Json
@@ -102,6 +110,8 @@ export async function callToolViaCli<T>(business: string, toolName: string, wire
     trace: {
       tool: toolName,
       business,
+      auth,
+      surface: surfaceOf(business.startsWith('http') ? business : `https://${business}`, toolName),
       endpoint: discovered.endpoint,
       durationMs: Date.now() - started,
       request: maskPII({ cli: ['ucp', ...args.map((a) => (a.startsWith('{') ? '<json>' : a))], body }),

@@ -2,20 +2,21 @@ import { NextResponse } from 'next/server'
 
 import { badRequest, errorJson } from '@/lib/api'
 import { getSession, pushLog } from '@/lib/session'
-import { lookup } from '@/lib/ucp/catalog'
+import { lookupSmart } from '@/lib/ucp/catalog'
+import { normalizeSeller } from '@/lib/session'
 
 export const dynamic = 'force-dynamic'
 
 export async function POST(req: Request) {
-  const { ids, via } = (await req.json()) as { ids?: string[]; via?: string }
+  const { ids, seller } = (await req.json()) as { ids?: string[]; seller?: string }
   if (!ids?.length) return badRequest('ids gerekli')
   const s = await getSession()
   try {
-    const r = await lookup(ids.slice(0, 50), via)
+    const r = await lookupSmart(ids.slice(0, 50), seller ? normalizeSeller(seller) : undefined)
     for (const t of r.traces)
-      pushLog(s, { tool: t.tool, endpoint: t.endpoint, durationMs: t.durationMs, request: t.request, response: '[Catalog yanıtı sunucuda saklanmaz]' })
+      pushLog(s, { tool: t.tool, auth: t.auth, surface: t.surface, endpoint: t.endpoint, durationMs: t.durationMs, request: t.request, response: '[Catalog yanıtı sunucuda saklanmaz]' })
     return NextResponse.json(
-      { products: r.data, messages: r.messages, dropped: r.dropped, traces: r.traces },
+      { products: r.data, messages: r.messages, dropped: r.dropped, traces: r.traces, notes: r.notes, report: r.report },
       { headers: { 'Cache-Control': 'no-store' } },
     )
   } catch (e) {

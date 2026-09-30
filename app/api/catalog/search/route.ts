@@ -15,7 +15,7 @@ export async function POST(req: Request) {
   try {
     const r = seller ? await searchSeller(normalizeSeller(seller), query) : await searchGlobal(query)
     for (const t of r.traces)
-      pushLog(s, { seller, tool: t.tool, endpoint: t.endpoint, durationMs: t.durationMs, request: t.request, response: '[Catalog yanıtı sunucuda saklanmaz]' })
+      pushLog(s, { seller, tool: t.tool, auth: t.auth, surface: t.surface, endpoint: t.endpoint, durationMs: t.durationMs, request: t.request, response: '[Catalog yanıtı sunucuda saklanmaz]' })
     return NextResponse.json(
       { products: r.data, messages: r.messages, notes: r.notes, dropped: r.dropped, traces: r.traces },
       { headers: { 'Cache-Control': 'no-store' } },

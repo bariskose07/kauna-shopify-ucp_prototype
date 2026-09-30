@@ -28,6 +28,9 @@ export interface DebugEntry {
   error?: unknown
   validation?: unknown
   notes?: string[]
+  /** Identity tier used for this request (token / signed / anonymous / cli). */
+  auth?: { mode: string; note?: string }
+  surface?: string
 }
 
 /** Request-shaped line item (what we send back on every full-replace update). */

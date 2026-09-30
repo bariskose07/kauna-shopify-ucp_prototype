@@ -90,3 +90,65 @@ describe('429 circuit breaker', () => {
     }
   })
 })
+
+describe('lookup id parsing', () => {
+  it('recognises variant GIDs, numbers, UPIDs and product URLs', async () => {
+    const { parseLookupId } = await import('../lib/ucp/catalog')
+    expect(parseLookupId('54030028341562')).toMatchObject({ kind: 'variant', raw: 'gid://shopify/ProductVariant/54030028341562' })
+    expect(parseLookupId('gid://shopify/p/abc')).toMatchObject({ kind: 'upid' })
+    expect(parseLookupId('https://us.aabcollection.com/products/green-tartan-maxi?variant=1&utm=x')).toMatchObject({
+      kind: 'url',
+      origin: 'https://us.aabcollection.com',
+      handle: 'green-tartan-maxi',
+      numeric: '1',
+    })
+    expect(parseLookupId('us.aabcollection.com/products/x')).toMatchObject({ kind: 'url', handle: 'x' })
+  })
+})
+
+describe('auth attribution', () => {
+  it('rate-limit from JSON-RPC error.data.retry_after blocks the endpoint', async () => {
+    const { rpc, rateLimitRemaining } = await import('../lib/ucp/client')
+    const ep = 'https://rpc-ratelimit.example/api/ucp/mcp'
+    const orig = globalThis.fetch
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, error: { code: -32000, message: 'Too many', data: { retry_after: 120 } } }), {
+        status: 200,
+      })) as typeof fetch
+    try {
+      await expect(rpc(ep, 'tools/list', {})).rejects.toMatchObject({ kind: 'rate_limited', retryAfterSeconds: 120 })
+      expect(rateLimitRemaining(ep)).toBeGreaterThan(100)
+    } finally {
+      globalThis.fetch = orig
+    }
+  })
+
+  it('token failure degrades the catalog to anonymous and records the reason', async () => {
+    const { rpc, getTokenState } = await import('../lib/ucp/client')
+    process.env.SHOPIFY_CLIENT_ID = 'id'
+    process.env.SHOPIFY_CLIENT_SECRET = 'secret'
+    process.env.SHOPIFY_CATALOG_URL = 'https://catalog.example/api/ucp/mcp'
+    const orig = globalThis.fetch
+    let sawAuthHeader = false
+    globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
+      if (String(url).includes('api.shopify.com'))
+        return new Response(JSON.stringify({ error: 'invalid_client', error_description: 'Client authentication failed' }), { status: 401 })
+      sawAuthHeader = Boolean((init?.headers as Record<string, string>)?.Authorization)
+      return new Response(JSON.stringify({ jsonrpc: '2.0', id: JSON.parse(String(init?.body)).id, result: { tools: [] } }), { status: 200 })
+    }) as typeof fetch
+    try {
+      const info: import('../lib/ucp/client').RpcInfo = {}
+      await rpc('https://catalog.example/api/ucp/mcp', 'tools/list', {}, 0, info)
+      expect(info.auth?.mode).toBe('anonymous')
+      expect(info.auth?.note).toMatch(/invalid_client/)
+      expect(sawAuthHeader).toBe(false)
+      expect(getTokenState()).toMatchObject({ status: 'failed' })
+      expect(getTokenState().error?.message).toMatch(/Client authentication failed/)
+    } finally {
+      globalThis.fetch = orig
+      delete process.env.SHOPIFY_CLIENT_ID
+      delete process.env.SHOPIFY_CLIENT_SECRET
+      delete process.env.SHOPIFY_CATALOG_URL
+    }
+  })
+})

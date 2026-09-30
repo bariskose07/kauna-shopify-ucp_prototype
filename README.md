@@ -112,6 +112,11 @@ tests/                  Birim testleri
 
 Üst çubukta her yüzey için o anki kimlik yolu ve son durum görünür: `Global Catalog: token · Mağaza katalog: anonim · Sepet: anonim · Checkout: anonim`. Yeşil nokta son isteğin başarılı olduğunu, kırmızı hatalı olduğunu, ⏳ hız limitini (kalan dakika) gösterir. Tıklayınca ayrıntılar açılır: token durumu ve başarısızlık nedeni, imzalı katman durumu, yüzey başına son istek. Aynı bilgi hata ayıklama panelinde her kayıtta rozet olarak, sunucu terminalinde `[ucp] …` satırları olarak da yer alır. Token alınamazsa Global Catalog anonim devam eder (dakikada bir yeniden denenir). Limitler için bkz. FINDINGS.md §10.
 
+### Kauna kimliği (canlıya hazırlık)
+
+- `profiles/kauna-agent-profile.2026-04-08.json`: Shopify'ın örnek ajan profilinin birebir kopyası. Kauna alan adında yayınlayın (ör. `https://kauna.ai/.well-known/ucp`) ve `.env`'de `UCP_AGENT_PROFILE_URL` olarak verin. Yayınlanan dosya yönlendirmesiz (3xx yok), `Content-Type: application/json` ve `Cache-Control: public, max-age>=60` ile sunulmalı (ucp-cli `doctor` kontrolleri).
+- `node scripts/gen-signing-key.mjs`: İmzalı katman için ES256 anahtar çifti üretir. Açık JWK'yı profile ekleyin (2026-04-08: `signing_keys`, 2026-08-25: `keys`). Özel anahtar `keys/` altına yazılır ve git'e eklenmez. İmzalama (RFC 9421) bu prototipte henüz uygulanmadı.
+
 ### Hata ayrımı
 
 - **Protokol hataları** (`UcpError`): JSON-RPC `error` (ör. `-32000`, `-32001`), HTTP 401/403/5xx, ağ hatası, keşif hatası. İstek işlenmemiştir. **429** → `Retry-After` kısa ise bir kez beklenir, değilse arayüze "N sn sonra deneyin" olarak taşınır.

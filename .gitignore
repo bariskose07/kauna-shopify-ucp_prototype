@@ -12,3 +12,7 @@ next-env.d.ts
 
 .DS_Store
 .vercel
+
+# UCP signing keys (private) — never commit
+keys/
+*.pem

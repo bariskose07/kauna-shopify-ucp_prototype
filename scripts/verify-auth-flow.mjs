@@ -41,7 +41,9 @@ const TOKEN_URL = process.env.SHOPIFY_AUTH_URL || 'https://api.shopify.com/auth/
 const CATALOG_MCP = process.env.SHOPIFY_CATALOG_URL || 'https://catalog.shopify.com/api/ucp/mcp'
 const CATALOG_ID = process.env.SHOPIFY_CATALOG_ID
 const CATALOG_PROFILE = 'https://shopify.dev/ucp/agent-profiles/examples/2026-08-25/valid-with-capabilities.json'
-const CART_CHECKOUT_PROFILE = process.env.VERIFY_CART_PROFILE || 'https://shopify.dev/ucp/agent-profiles/examples/2026-08-25/cart-and-checkout.json'
+// Declares cart + checkout + fulfillment + discount (the examples/…/cart-and-checkout.json
+// profile left fulfillment out of AAB's schema — no address possible).
+const CART_CHECKOUT_PROFILE = process.env.VERIFY_CART_PROFILE || 'https://shopify.dev/ucp/agent-profiles/2026-08-25/valid-with-capabilities.json'
 const MCP_PROTOCOL_VERSION = '2026-03-26'
 const FORBIDDEN = new Set(['complete_checkout'])
 

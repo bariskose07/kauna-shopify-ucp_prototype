@@ -152,7 +152,7 @@ describe('per-call token policy', () => {
 
   it('Global Catalog uses the catalog profile', async () => {
     expect(CATALOG_PROFILE).toMatch(/examples\/2026-08-25\/valid-with-capabilities\.json$/)
-    expect(CART_CHECKOUT_PROFILE).toMatch(/examples\/2026-08-25\/cart-and-checkout\.json$/)
+    expect(CART_CHECKOUT_PROFILE).toBe('https://shopify.dev/ucp/agent-profiles/2026-08-25/valid-with-capabilities.json')
   })
 })
 
@@ -243,9 +243,11 @@ describe('token', () => {
 })
 
 describe('agent profile override', () => {
-  it('is used only when it declares cart and checkout', () => {
-    expect(declaresCartAndCheckout({ ucp: { capabilities: { 'dev.ucp.shopping.cart': [], 'dev.ucp.shopping.checkout': [] } } })).toBe(true)
-    expect(declaresCartAndCheckout({ ucp: { capabilities: [{ name: 'dev.ucp.shopping.cart' }, { name: 'dev.ucp.shopping.checkout' }] } })).toBe(true)
+  it('is used only when it declares cart, checkout and fulfillment', () => {
+    const f = 'dev.ucp.shopping.fulfillment'
+    expect(declaresCartAndCheckout({ ucp: { capabilities: { 'dev.ucp.shopping.cart': [], 'dev.ucp.shopping.checkout': [], [f]: [] } } })).toBe(true)
+    expect(declaresCartAndCheckout({ ucp: { capabilities: [{ name: 'dev.ucp.shopping.cart' }, { name: 'dev.ucp.shopping.checkout' }, { name: f }] } })).toBe(true)
+    expect(declaresCartAndCheckout({ ucp: { capabilities: { 'dev.ucp.shopping.cart': [], 'dev.ucp.shopping.checkout': [] } } })).toBe(false)
     expect(declaresCartAndCheckout({ ucp: { capabilities: { 'dev.ucp.shopping.checkout': [] } } })).toBe(false)
   })
 })

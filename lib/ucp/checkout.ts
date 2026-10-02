@@ -233,6 +233,11 @@ export function buildCheckoutBody({ draft, facts, last, cart, includeFulfillment
 
   // 3. fulfillment (destination + selected options)
   let faultInjected = false
+  if (includeFulfillment && !facts.supportsFulfillment) {
+    notes.push(
+      'Şema checkout.fulfillment içermiyor → teslimat adresi GÖNDERİLEMEDİ. Ajan profili dev.ucp.shopping.fulfillment yeteneğini bildirmiyor olabilir (mağaza eklentileri profile göre açar).',
+    )
+  }
   if (includeFulfillment && facts.supportsFulfillment) {
     const dest = pick(
       b,

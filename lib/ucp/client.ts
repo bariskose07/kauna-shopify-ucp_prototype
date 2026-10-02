@@ -33,7 +33,17 @@ export const SUPPORTED_VERSIONS = ['2026-08-25', '2026-04-08'] as const
 export const MCP_PROTOCOL_VERSION = '2026-03-26'
 /** Shopify's example agent profiles (Authenticate your agent, steps 3–5). */
 export const CATALOG_PROFILE = 'https://shopify.dev/ucp/agent-profiles/examples/2026-08-25/valid-with-capabilities.json'
-export const CART_CHECKOUT_PROFILE = 'https://shopify.dev/ucp/agent-profiles/examples/2026-08-25/cart-and-checkout.json'
+/**
+ * Profile for cart + checkout calls. The business negotiates extensions from
+ * the capabilities this profile declares. Observed live (AAB, 2026-10-02):
+ * with `examples/2026-08-25/cart-and-checkout.json` the update_checkout schema
+ * had NO `fulfillment` and NO `discounts`, so no shipping address or
+ * discount code could be sent. This one (what @shopify/ucp-cli presents)
+ * declares cart, checkout, fulfillment, discount, buyer_consent and order.
+ */
+export const CART_CHECKOUT_PROFILE = 'https://shopify.dev/ucp/agent-profiles/2026-08-25/valid-with-capabilities.json'
+/** Capabilities the cart/checkout profile must declare for the flow to work. */
+export const REQUIRED_MERCHANT_CAPABILITIES = ['dev.ucp.shopping.cart', 'dev.ucp.shopping.checkout', 'dev.ucp.shopping.fulfillment'] as const
 const TOKEN_URL_DEFAULT = 'https://api.shopify.com/auth/access_token'
 /** Checkout tools carry the Bearer token; cart tools never do. */
 export const CHECKOUT_TOOLS: ReadonlySet<string> = new Set(['create_checkout', 'get_checkout', 'update_checkout', 'cancel_checkout'])
@@ -589,7 +599,7 @@ const overrideCheck: { url?: string; ok?: boolean; reason?: string } = ((globalT
   __ucpProfileCheck?: { url?: string; ok?: boolean; reason?: string }
 }).__ucpProfileCheck ??= {})
 
-/** Does a profile JSON declare both the cart and the checkout capability? */
+/** Does a profile JSON declare cart, checkout and fulfillment (address)? */
 export function declaresCartAndCheckout(profile: unknown): boolean {
   const caps = ((profile as Json | undefined)?.ucp as Json | undefined)?.capabilities
   const names = Array.isArray(caps)
@@ -597,7 +607,7 @@ export function declaresCartAndCheckout(profile: unknown): boolean {
     : caps && typeof caps === 'object'
       ? Object.keys(caps)
       : []
-  return names.includes('dev.ucp.shopping.cart') && names.includes('dev.ucp.shopping.checkout')
+  return REQUIRED_MERCHANT_CAPABILITIES.every((c) => names.includes(c))
 }
 
 /**
@@ -612,7 +622,7 @@ async function merchantToolsProfile(): Promise<string> {
     try {
       const r = await getJson(url)
       overrideCheck.ok = r.status === 200 && declaresCartAndCheckout(r.body)
-      overrideCheck.reason = overrideCheck.ok ? undefined : r.status !== 200 ? `HTTP ${r.status}` : 'cart + checkout yeteneği ilan etmiyor'
+      overrideCheck.reason = overrideCheck.ok ? undefined : r.status !== 200 ? `HTTP ${r.status}` : 'cart + checkout + fulfillment yeteneklerini ilan etmiyor'
     } catch (e) {
       overrideCheck.ok = false
       overrideCheck.reason = (e as Error).message

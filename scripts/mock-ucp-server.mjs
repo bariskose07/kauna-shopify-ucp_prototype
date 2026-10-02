@@ -95,6 +95,15 @@ const tools = [
   { name: 'lookup_catalog', inputSchema: { type: 'object', properties: { meta, catalog: { type: 'object', properties: { ids: { type: 'array' }, filters: { type: 'object' }, context: { type: 'object' } } } } } },
 ]
 
+function toolsWithoutExtensions() {
+  return tools.map((t) => {
+    const body = t.inputSchema.properties.checkout
+    if (!body) return t
+    const { fulfillment: _f, discounts: _d, ...rest } = body.properties
+    return { ...t, inputSchema: { ...t.inputSchema, properties: { ...t.inputSchema.properties, checkout: { ...body, properties: rest } } } }
+  })
+}
+
 const PRICE = 13400
 
 // ── catalog (so the whole UI can be exercised offline) ──────────────────────
@@ -375,7 +384,10 @@ const server = createServer({ cert: readFileSync(process.env.MOCK_TLS_CERT), key
       // Catalog instance (other port): Global Catalog needs the token, tools/list included.
       if (PORT !== SELLER_PORT && !bearer)
         return send(200, { jsonrpc: '2.0', id: rpc.id, error: { code: -32000, message: 'AuthenticationRequired: Global Catalog needs a Bearer token' } })
-      if (rpc.method === 'tools/list') return send(200, { jsonrpc: '2.0', id: rpc.id, result: { tools } })
+      // Extension negotiation (seen live): a profile without the fulfillment /
+      // discount capabilities gets checkout schemas without those fields.
+      const profile = String(rpc.params?.arguments?.meta?.['ucp-agent']?.profile ?? '')
+      if (rpc.method === 'tools/list') return send(200, { jsonrpc: '2.0', id: rpc.id, result: { tools: /cart-and-checkout/.test(profile) ? toolsWithoutExtensions() : tools } })
       if (name.endsWith('_checkout') && !bearer)
         return send(200, { jsonrpc: '2.0', id: rpc.id, error: { code: -32000, message: 'AuthenticationRequired: checkout tools need a Bearer token' } })
       // Live behaviour (2026-10-02): token-authenticated checkout without the

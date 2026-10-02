@@ -50,7 +50,7 @@ npm run typecheck
 | Değişken | Zorunlu | Açıklama |
 | --- | --- | --- |
 | `SHOPIFY_CLIENT_ID` / `SHOPIFY_CLIENT_SECRET` | Evet (Global Catalog ve checkout için) | Dev Dashboard istemci bilgileri. Sunucu `https://api.shopify.com/auth/access_token` (`grant_type=client_credentials`) ile JWT alır, bellekte tutar, bitişten 1 dk önce yeniler. Eski adlar (`SHOPIFY_API_KEY/SECRET`, `UCP_CLIENT_ID/SECRET`, `CLIENT_ID/SECRET`) uyarıyla okunur. |
-| `UCP_AGENT_PROFILE_URL` | Hayır | Sepet + checkout çağrıları için Kauna'nın kendi profili. Yalnızca `dev.ucp.shopping.cart` **ve** `dev.ucp.shopping.checkout` ilan ediyorsa kullanılır; yoksa Shopify'ın `examples/2026-08-25/cart-and-checkout.json` profili. Katalog her zaman `examples/2026-08-25/valid-with-capabilities.json`. |
+| `UCP_AGENT_PROFILE_URL` | Hayır | Sepet + checkout çağrıları için Kauna'nın kendi profili. Yalnızca `dev.ucp.shopping.cart`, `checkout` **ve** `fulfillment` ilan ediyorsa kullanılır; yoksa `2026-08-25/valid-with-capabilities.json` (ucp-cli'ın profili). `examples/…/cart-and-checkout.json` fulfillment içermediği için AAB adres alanını sunmuyor (FINDINGS §13.4). Katalog her zaman `examples/2026-08-25/valid-with-capabilities.json`. |
 | `UCP_TOKENLESS_FALLBACK` | Hayır | `1` → Ayarlar'daki "Token reddedilirse token'sız dene (yalnızca test)" açık başlar. Varsayılan kapalı. |
 | `UCP_TRANSPORT` | Hayır | `cli` → Ayarlar'daki "CLI adaptörü (yalnızca test)" açık başlar. Varsayılan doğrudan JSON-RPC. |
 | `UCP_CLI_BIN` | Hayır | CLI adaptöründe `ucp` ikilisinin yolu. |
@@ -74,7 +74,7 @@ Hiçbir değişken `NEXT_PUBLIC_` değildir; sırlar tarayıcıya gitmez. `.env*
 | --- | --- | --- | --- |
 | Global Catalog | `search_catalog`, `lookup_catalog`, `get_product`, `tools/list` | `Bearer <token>` | `…/examples/2026-08-25/valid-with-capabilities.json` |
 | Mağaza kataloğu | aynı araçlar, mağaza uç noktasında | yok — *tasarım gereği* | `…/valid-with-capabilities.json` |
-| Sepet | `create_cart`, `get_cart`, `update_cart`, `cancel_cart` | yok — *tasarım gereği* | `…/examples/2026-08-25/cart-and-checkout.json` |
+| Sepet | `create_cart`, `get_cart`, `update_cart`, `cancel_cart` | yok — *tasarım gereği* | `…/2026-08-25/valid-with-capabilities.json` (fulfillment + discount dahil) |
 | Checkout | `create_checkout`, `get_checkout`, `update_checkout`, `cancel_checkout` | `Bearer <token>` | `…/cart-and-checkout.json` |
 
 - Her JSON-RPC isteğinde `MCP-Protocol-Version: 2026-03-26`.

@@ -261,3 +261,13 @@ node --env-file=.env scripts/verify-auth-flow.mjs
 - `extension_interaction_required` / `requires_buyer_input` nedeniyle AAB'de durum her zaman `requires_escalation`. Mağazanın checkout eklentisi var, ödeme mağazanın sayfasında (`continue_url`) tamamlanmalı. Prototipin yaptığı da bu.
 - `Shopify-Buyer-IP` sorunu çözüldü. Dev Dashboard token'ı checkout'ta kabul ediliyor.
 
+### 13.4 Adres gönderilemiyordu: profil, mağazanın eklentilerini belirliyor (2026-10-02)
+
+**Belirti:** Satın al → token ile checkout oluştu ama mağaza sayfasında adres boştu.
+
+**Neden:** `examples/2026-08-25/cart-and-checkout.json` profiliyle alınan canlı AAB `update_checkout` şemasında yalnızca `payment`, `line_items`, `buyer` (`email`, `phone_number`), `context`, `attribution` vardı. **`fulfillment` ve `discounts` yoktu.** Mağaza uzantıları (fulfillment = teslimat adresi, discount = indirim kodu) ajanın profilinde ilan ettiği yeteneklere göre açıyor. O profil yalnızca sepet + checkout ilan ettiği için adres alanı hiç sunulmadı. Kod şemada olmayan alanı göndermediği için adres sessizce düştü.
+
+**Düzeltme:** Sepet/checkout profili artık `https://shopify.dev/ucp/agent-profiles/2026-08-25/valid-with-capabilities.json`. Bu profili `@shopify/ucp-cli` de kullanıyor. İlan ettiği yetenekler: checkout, fulfillment, buyer_consent, discount, cart, order, catalog.search, catalog.lookup, dev.shopify.catalog, dev.shopify.catalog.global (ucp-cli deposundaki birebir kopyadan). `UCP_AGENT_PROFILE_URL` artık cart + checkout + **fulfillment** ilan ediyorsa kullanılıyor. Şemada `fulfillment` yoksa "Teknik ayrıntılar"da açık not çıkıyor. Sahte sunucu da bu müzakereyi taklit ediyor.
+
+**Kauna'nın kendi profili için:** en az `dev.ucp.shopping.cart`, `dev.ucp.shopping.checkout`, `dev.ucp.shopping.fulfillment` ve indirim için `dev.ucp.shopping.discount` ilan edilmeli.
+

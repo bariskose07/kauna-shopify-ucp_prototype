@@ -101,6 +101,8 @@ export default function App() {
             summary={summary}
             prepared={prepared}
             running={running}
+            mode={settings.mode}
+            budgetMs={settings.affiliateBudgetMs}
             openResult={openResult}
             onOpen={() => void onOpen()}
             onBack={() => setTab('product')}

@@ -93,6 +93,12 @@ export function SettingsScreen({ value, onSave }: { value: Settings; onSave: (s:
       </Card>
 
       <Card title="Bekleme süreleri (ms)">
+        <Field
+          label="Mod C: affiliate için en fazla bekleme (ms, UCP sonrası; aşılırsa yedek mod)"
+          value={String(v.affiliateBudgetMs)}
+          keyboardType="number-pad"
+          onChangeText={(t) => set('affiliateBudgetMs', Number(t) || 6000)}
+        />
         <Field label="_up_click_id için en fazla" value={String(v.upWaitMs)} keyboardType="number-pad" onChangeText={(t) => set('upWaitMs', Number(t) || 8000)} />
         <Field label="Sayfa yükleme zaman aşımı" value={String(v.loadTimeoutMs)} keyboardType="number-pad" onChangeText={(t) => set('loadTimeoutMs', Number(t) || 15000)} />
       </Card>

@@ -75,10 +75,12 @@ Kimlik kuralı web prototipiyle aynıdır: checkout araçları Shopify token'ı 
 | --- | --- | --- |
 | **A – Sadece UCP** | UCP checkout → özet → `continue_url` | Yok (karşılaştırma için) |
 | **B – Mağaza sepeti** | (UCP özeti bilgi için) → görünmez WebView ref'li ürün sayfası → `/cart.js`'te `_up_click_id` bekle (8 sn) → `/cart/add.js` → `token` → `{mağaza}/cart/c/{token}&checkout[...]` (veya ayara göre aynı WebView'da `/checkout?checkout[...]`) | Sepette `_up_click_id` |
-| **C – UCP + çerez** (varsayılan) | UCP checkout → görünmez WebView ana sayfa → önceki `cart` çerezini sakla → çerezi UCP sepetine ayarla → `/cart.js` ile doğrula → ref'li ürün sayfası → `_up_click_id` + token eşleşmesini bekle (8 sn) → **önceki sepeti geri koy** (yoksa çerezi sil) → `continue_url` (+ ayara göre `&sca_ref`) | UCP sepetinde `_up_click_id`; yazılmazsa ayara göre D / B / dur |
+| **C – UCP + çerez** (varsayılan) | UCP checkout **ile aynı anda** görünmez WebView mağazanın `/cart.js` adresini açar (küçük JSON; ana sayfa artık açılmıyor; yalnızca `/cart.js` açılamazsa yedek olarak açılıyor) → önceki `cart` çerezini sakla → çerezi UCP sepetine ayarla → `/cart.js` ile doğrula → ref'li ürün sayfası (tek tam sayfa) → `_up_click_id` + token eşleşmesini bekle → **önceki sepeti geri koy** (yoksa çerezi sil) → `continue_url` (+ ayara göre `&sca_ref`). UCP sonrası her şey **süre sınırına** tabi (varsayılan 6 sn). Aşılırsa yükleme durdurulur, sepet geri konur, yedek moda geçilir. | UCP sepetinde `_up_click_id`; yazılmazsa ya da süre aşılırsa ayara göre D / B / dur |
 | **D – UCP + sca_ref** | UCP checkout → `continue_url&sca_ref=…` | Belirsiz (piksele bağlı) |
 
-Mod C'de geri yükleme adımı akış hata verse bile her durumda çalışır (`finally`).
+Mod C'de geri yükleme adımı akış hata verse ya da süre aşılsa bile her durumda çalışır (`finally`).
+
+**Özet önce:** Özet ekranında UCP özeti (1–3 sn'de gelir) en üstte gösterilir. "Ödeme sayfasını aç" butonu affiliate hazırlığı bitene kadar "Hazırlanıyor… N sn" olarak bekler; süre sınırından sonra her durumda açılır. Kullanıcı bu sürede özeti okur.
 
 ## Açılış seçenekleri
 

@@ -15,6 +15,8 @@ export interface BrowserHandle {
   show(url?: string): void
   hide(): void
   reset(): void
+  /** Abort an in-flight navigation (used when the affiliate time budget runs out). */
+  stop(): void
 }
 
 interface Props {
@@ -30,6 +32,9 @@ let seq = 0
 export const Browser = forwardRef<BrowserHandle, Props>(function Browser({ incognito, onThankYou, onClosed }, ref) {
   const wv = useRef<WebView>(null)
   const [uri, setUri] = useState<string | null>(null)
+  // Mirror of `uri` that is current even inside a stale handle (prepare()
+  // keeps the handle it was given; reset() + load() can run in one tick).
+  const uriRef = useRef<string | null>(null)
   const [session, setSession] = useState(0)
   const [visible, setVisible] = useState(false)
   const [currentUrl, setCurrentUrl] = useState('')
@@ -37,8 +42,10 @@ export const Browser = forwardRef<BrowserHandle, Props>(function Browser({ incog
   const pending = useRef(new Map<string, Waiter>())
 
   const navigate = (url: string) => {
-    if (!uri) setUri(url)
-    else wv.current?.injectJavaScript(`window.location.href = ${JSON.stringify(url)}; true;`)
+    if (!uriRef.current) {
+      uriRef.current = url
+      setUri(url)
+    } else wv.current?.injectJavaScript(`window.location.href = ${JSON.stringify(url)}; true;`)
   }
 
   useImperativeHandle(ref, () => ({
@@ -84,9 +91,17 @@ export const Browser = forwardRef<BrowserHandle, Props>(function Browser({ incog
     },
     reset() {
       // New attempt: fresh instance (a new incognito session in incognito mode).
+      uriRef.current = null
       setUri(null)
       setVisible(false)
       setSession((n) => n + 1)
+    },
+    stop() {
+      wv.current?.stopLoading()
+      if (loadWaiter.current) {
+        clearTimeout(loadWaiter.current.timer)
+        loadWaiter.current = null
+      }
     },
   }))
 

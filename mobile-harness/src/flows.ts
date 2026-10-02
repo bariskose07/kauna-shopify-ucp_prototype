@@ -111,10 +111,10 @@ export async function prepare(ctx: Ctx): Promise<Prepared> {
     }
   }
 
-  const pollUp = async (expectToken?: string): Promise<{ seen: boolean; info?: CartInfo; ms: number }> => {
+  const pollUp = async (expectToken?: string, maxMs = s.upWaitMs): Promise<{ seen: boolean; info?: CartInfo; ms: number }> => {
     const t0 = Date.now()
     let info: CartInfo | undefined
-    while (Date.now() - t0 < s.upWaitMs) {
+    while (Date.now() - t0 < maxMs) {
       info = await browser.run<CartInfo>(JS.cartInfo)
       const tokenOk = expectToken ? Boolean(info.token?.startsWith(expectToken)) : true
       if (expectToken) attempt.tokenMatchAfterRef = tokenOk
@@ -188,17 +188,48 @@ export async function prepare(ctx: Ctx): Promise<Prepared> {
       result = await modeB(false)
     } else {
       // ── Mode C: UCP cart + UpPromote writes _up_click_id into it ───────
-      const sum = (await ucp()) as UcpSummary
-      if (!sum.cartToken || !sum.cartKey) throw new Error('Sunucu cartToken/cartKey döndürmedi (checkout id biçimi farklı)')
+      // Speed-ups (measured 11–19 s before, mostly two full page loads):
+      //  • the WebView joins the store origin through /cart.js (tiny JSON)
+      //    instead of the home page, IN PARALLEL with the UCP checkout;
+      //  • the cookie is written on that page, so only ONE full page (the
+      //    ref'd product page) is loaded;
+      //  • everything after the UCP checkout has a time budget
+      //    (affiliateBudgetMs); when it runs out the payment page opens via
+      //    the fallback instead of making the buyer wait.
       browser.reset()
+      const ucpP = ucp()
+      const warmP = (async () => {
+        const st = push('Mağaza bağlantısı (/cart.js) — UCP ile paralel')
+        const t0 = Date.now()
+        try {
+          attempt.timings.warmMs = await browser.load(`${s.store}/cart.js`, s.loadTimeoutMs)
+          done(st, true, undefined, t0)
+          return true
+        } catch (e) {
+          done(st, false, `${(e as Error).message} → ana sayfa denenecek`, t0)
+          return false
+        }
+      })()
+      const sum = (await ucpP) as UcpSummary
+      if (!sum.cartToken || !sum.cartKey) throw new Error('Sunucu cartToken/cartKey döndürmedi (checkout id biçimi farklı)')
+      const warmOk = await warmP
+
+      const affStart = Date.now()
+      const deadline = affStart + s.affiliateBudgetMs
+      const left = () => Math.max(300, deadline - Date.now())
       let prev: string | null = null
       let cookieSet = false
       let seen = false
+      let affErr: string | undefined
       try {
-        let st = push('Mağaza ana sayfası yükleniyor…')
-        let t0 = Date.now()
-        attempt.timings.homeLoadMs = await browser.load(`${s.store}/`, s.loadTimeoutMs)
-        done(st, true, undefined, t0)
+        let st: Step
+        let t0: number
+        if (!warmOk) {
+          st = push('Mağaza ana sayfası yükleniyor (yedek)…')
+          t0 = Date.now()
+          attempt.timings.homeLoadMs = await browser.load(`${s.store}/`, Math.min(s.loadTimeoutMs, left()))
+          done(st, true, undefined, t0)
+        }
 
         st = push('Sepet bağlanıyor (cart çerezi → UCP sepeti)…')
         prev = await browser.run<string | null>(JS.readCartCookie)
@@ -216,12 +247,12 @@ export async function prepare(ctx: Ctx): Promise<Prepared> {
         t0 = Date.now()
         attempt.timings.refLoadMs = await browser.load(
           `${s.store}/products/${s.handle}?sca_ref=${encodeURIComponent(s.ref)}`,
-          s.loadTimeoutMs,
+          Math.min(s.loadTimeoutMs, left()),
         )
         done(st, true, undefined, t0)
 
         st = push('Affiliate kimliği bekleniyor (_up_click_id)…')
-        const up = await pollUp(sum.cartToken)
+        const up = await pollUp(sum.cartToken, Math.min(s.upWaitMs, left()))
         seen = up.seen
         attempt.upClickIdSeen = up.seen
         attempt.timings.upClickIdMs = up.ms
@@ -230,9 +261,22 @@ export async function prepare(ctx: Ctx): Promise<Prepared> {
           up.seen,
           up.seen
             ? `UCP sepetinde görüldü (${up.info?.upHead}…)`
-            : `${s.upWaitMs / 1000} sn içinde gelmedi · token ${attempt.tokenMatchAfterRef ? '= UCP' : '≠ UCP'}`,
+            : `${Math.round(up.ms / 100) / 10} sn içinde gelmedi · token ${attempt.tokenMatchAfterRef ? '= UCP' : '≠ UCP'}`,
         )
+      } catch (e) {
+        // After the UCP checkout nothing here may block the purchase: any
+        // failure (incl. a page timeout) goes to the fallback below.
+        affErr = (e as Error).message
+        const st = steps.find((x) => x.state === 'run')
+        if (st) done(st, false, affErr)
       } finally {
+        attempt.timings.affiliateMs = Date.now() - affStart
+        if (!seen && Date.now() >= deadline - 50) {
+          attempt.budgetExceeded = true
+          // A ref page still loading could otherwise let the affiliate script
+          // write into the user's restored cart.
+          browser.stop()
+        }
         // Always put the user's own store cart back (spec rule 3).
         if (cookieSet || prev !== null) {
           const st = push('Önceki sepet geri yükleniyor…')
@@ -245,6 +289,7 @@ export async function prepare(ctx: Ctx): Promise<Prepared> {
           }
         }
       }
+      if (affErr && !attempt.budgetExceeded) attempt.error = affErr
 
       if (seen) {
         result = {
@@ -254,11 +299,14 @@ export async function prepare(ctx: Ctx): Promise<Prepared> {
           affiliateNote: 'Affiliate kimliği UCP sepetine UpPromote’un kendi kodu tarafından yazıldı.',
         }
       } else {
-        attempt.error = 'affiliate kimliği yazılmadı'
+        const why = attempt.budgetExceeded
+          ? `süre sınırı (${s.affiliateBudgetMs / 1000} sn) aşıldı`
+          : affErr ?? 'affiliate kimliği yazılmadı'
+        attempt.error = why
         if (s.fallbackC === 'stop') {
           attempt.outcome = 'stopped'
           attempt.timings.totalPrepMs = Date.now() - started
-          return { attempt, summary: sum, affiliateNote: 'Affiliate kimliği yazılmadı — ayar gereği durduruldu.' }
+          return { attempt, summary: sum, affiliateNote: `Affiliate hazırlığı tamamlanmadı (${why}) — ayar gereği durduruldu.` }
         }
         if (s.fallbackC === 'D') {
           attempt.fallbackUsed = 'D'
@@ -266,7 +314,7 @@ export async function prepare(ctx: Ctx): Promise<Prepared> {
             attempt,
             summary: sum,
             paymentUrl: sum.continueUrl ? appendParam(sum.continueUrl, 'sca_ref', s.ref) : undefined,
-            affiliateNote: 'Kimlik yazılmadı → Mod D: affiliate takibi belirsiz (piksele bağlı).',
+            affiliateNote: `Affiliate hazırlığı tamamlanmadı (${why}) → Mod D: continue_url + sca_ref, takip belirsiz (piksele bağlı).`,
           }
         } else {
           attempt.fallbackUsed = 'B'

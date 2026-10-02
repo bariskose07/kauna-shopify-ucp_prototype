@@ -20,6 +20,8 @@ export interface Attempt {
   prevCartRestored?: boolean | null
   ucpMessages?: string
   fallbackUsed?: string
+  /** Mode C: the affiliate time budget ran out. */
+  budgetExceeded?: boolean
   paymentUrlMasked?: string
   thankYouSeen?: boolean
   outcome: 'ok' | 'error' | 'stopped' | 'running'
@@ -69,10 +71,13 @@ const COLS: [string, (a: Attempt) => string][] = [
   ['Durum', (a) => a.status ?? '—'],
   ['Kimlik yolu', (a) => a.authModes ?? '—'],
   ['UCP ms', (a) => String(a.timings.ucpMs ?? '')],
-  ['Ana sayfa ms', (a) => String(a.timings.homeLoadMs ?? '')],
+  ['Mağaza bağlantısı ms (/cart.js, UCP ile paralel)', (a) => String(a.timings.warmMs ?? '')],
+  ['Ana sayfa ms (yalnızca yedek)', (a) => String(a.timings.homeLoadMs ?? '')],
   ['Ref sayfa ms', (a) => String(a.timings.refLoadMs ?? '')],
   ['_up_click_id ms', (a) => String(a.timings.upClickIdMs ?? '')],
+  ['Affiliate ms (UCP sonrası)', (a) => String(a.timings.affiliateMs ?? '')],
   ['Hazırlık ms', (a) => String(a.timings.totalPrepMs ?? '')],
+  ['Süre sınırı aşıldı', (a) => yn(a.budgetExceeded)],
   ['Token eşleşti (çerez sonrası)', (a) => yn(a.tokenMatchAfterCookie)],
   ['Token eşleşti (ref sonrası)', (a) => yn(a.tokenMatchAfterRef)],
   ['_up_click_id', (a) => yn(a.upClickIdSeen)],

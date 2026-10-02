@@ -54,3 +54,26 @@ Sahte mağazadaki “UpPromote” yalnızca test için yazılmış basit bir bet
 ## 4. Kimlik katmanlarının kaynağı
 
 Shopify'ın token / imzalı / anonim katmanları ve limitleri: <https://shopify.dev/docs/agents/profiles/auth-and-rate-limiting> (ayrıca <https://shopify.dev/docs/agents/get-started/authentication>). Bu sayfalar geliştirme ortamından açılamadı; içerik arama özetlerinden alındı. Ayrıntı: kök `FINDINGS.md` §10.
+
+## 5. İlk gerçek cihaz ölçümleri ve hızlandırma (2026-10-02)
+
+Android 13, AAB US, Mod C (uygulama içi tarayıcı, kalıcı çerez), 4 başarılı deneme:
+
+| Adım | Süre |
+| --- | --- |
+| UCP checkout | 1,3–3,1 sn |
+| Ana sayfa yükleme | 4,6–12 sn (bir denemede 15 sn zaman aşımı → hata) |
+| Ref'li ürün sayfası | 3,8–4,5 sn |
+| `_up_click_id` | 0,25–1 sn |
+| Toplam | 11–19 sn |
+
+Sonuç: dört başarılı denemenin hepsinde token eşleşmeleri ✓, `_up_click_id` UCP sepetinde ✓, önceki sepet geri yüklendi ✓, adres dolu ✓ (kullanıcı notu). Kimlik yolu `create_checkout: token`.
+
+**Uygulanan hızlandırma** (önerilerden 1, 2, 6, 7):
+- Ana sayfa yerine `/cart.js`, UCP çağrısıyla **paralel**. Çerez bu sayfada yazılıyor; tek tam sayfa yükü ref'li ürün sayfası.
+- UCP sonrası **süre sınırı** (`affiliateBudgetMs`, varsayılan 6 sn). Aşılırsa yükleme durduruluyor, sepet geri konuyor, yedek moda (varsayılan D) geçiliyor. Sayfa zaman aşımı artık hata değil, yedek.
+- Özet ekranı önce UCP özetini gösteriyor; ödeme butonu hazırlık bitince açılıyor.
+- Günlükte yeni sütunlar: "Mağaza bağlantısı ms", "Affiliate ms (UCP sonrası)", "Süre sınırı aşıldı".
+- Sahte mağazada doğrulandı (Chromium, aynı sayfa içi betikler): paralel adım 359 ms; önceki çerez `/cart.js` sayfasında okundu; token eşleşti; `_up_click_id` UCP sepetinde; kullanıcının kendi sepeti geri yüklendi ve ona `_up_click_id` yazılmadı.
+- Beklenen gerçek süre: UCP (~2 sn) + ref sayfası (~4 sn) + kimlik (~0,5 sn) ≈ **6–7 sn**. Bunun 4–5 sn'si kullanıcı özeti okurken geçiyor. **Gerçek cihazda yeniden ölçülmeli.**
+

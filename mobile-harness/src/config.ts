@@ -34,6 +34,12 @@ export interface Settings {
   buyer: Buyer
   upWaitMs: number
   loadTimeoutMs: number
+  /**
+   * Mode C: the most the affiliate step (after the UCP checkout) may take.
+   * When it runs out the payment page opens via the fallback (default D:
+   * continue_url + sca_ref) instead of making the buyer wait.
+   */
+  affiliateBudgetMs: number
 }
 
 export const DEFAULTS: Settings = {
@@ -64,6 +70,7 @@ export const DEFAULTS: Settings = {
   },
   upWaitMs: 8000,
   loadTimeoutMs: 15000,
+  affiliateBudgetMs: 6000,
 }
 
 const KEY = 'kauna.harness.settings.v1'

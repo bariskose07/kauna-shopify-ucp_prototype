@@ -245,5 +245,19 @@ node --env-file=.env scripts/verify-auth-flow.mjs
 - `X-Forwarded-For` başlığı yalnızca Kauna'nın kendi proxy/CDN katmanından geliyorsa güvenilir; aksi halde istemci bu değeri sahte gönderebilir.
 - Mobil uygulama için de aynı kural geçerli: telefonun genel IP'si Kauna API'sine gelen istekte görünür.
 
-**Tekrar çalıştırma:** `.env` içine `UCP_BUYER_IP=<curl -s https://api.ipify.org çıktısı>` ekleyip betiği yeniden çalıştırın. Sonuç: _bekleniyor_.
+**Tekrar çalıştırma:** `.env` içine `UCP_BUYER_IP=<curl -s https://api.ipify.org çıktısı>` ekleyip betiği yeniden çalıştırın. 
+
+**İkinci canlı çalıştırma (2026-10-02 14:12 UTC, `UCP_BUYER_IP` ile): 7/7 ✓**
+
+| # | Adım | Kimlik yolu | Sonuç | Ayrıntı |
+| --- | --- | --- | --- | --- |
+| 4 | `create_cart` | token yok – tasarım gereği | ok | |
+| 5 | `create_checkout` | token + `Shopify-Buyer-IP` | ok | `requires_escalation`; mesajlar: `buyer_identity_contact_method_required` (recoverable), `extension_interaction_required` (requires_buyer_input), `delivery_address_required` (recoverable), `delivery_no_delivery_available` (recoverable) |
+| 6 | `get_checkout` → `update_checkout` (`buyer.email`) | token + IP | ok | `buyer_identity_contact_method_required` kalktı, yani e-posta işlendi. `currency` update şemasında yok, gönderilmedi. Adres gönderilmediği için adres mesajları sürüyor (beklenen). |
+| 8 | `cancel_checkout` | token + IP | ok | `canceled` |
+
+**Sonuçlar:**
+- AAB'nin canlı şeması `cart_id`'yi **`checkout` içinde** listeliyor, üst düzeyde değil. Kod şemayı okuyup doğru yere koydu.
+- `extension_interaction_required` / `requires_buyer_input` nedeniyle AAB'de durum her zaman `requires_escalation`. Mağazanın checkout eklentisi var, ödeme mağazanın sayfasında (`continue_url`) tamamlanmalı. Prototipin yaptığı da bu.
+- `Shopify-Buyer-IP` sorunu çözüldü. Dev Dashboard token'ı checkout'ta kabul ediliyor.
 

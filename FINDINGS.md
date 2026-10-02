@@ -151,7 +151,17 @@ Kaynaklar: [Auth and rate limiting](https://shopify.dev/docs/agents/profiles/aut
 
 **Uygulamada görünürlük:** Her UCP isteğinin kimlik yolu (token / imzalı / anonim / CLI yedeği) hata ayıklama panelinde rozet olarak ve sunucu logunda `[ucp] <araç> → <host> surface=… auth=…` satırı olarak görünüyor. Üst çubukta yüzey başına gösterge var (Global Catalog · Mağaza katalog · Sepet · Checkout). Token başarısız olursa nedeni gösteriliyor ve Global Catalog anonim devam ediyor; token en fazla dakikada bir yeniden deneniyor.
 
-## 11. Sonraki adımlar (kendi makinenizde)
+## 11. Alıcı/adres işlenmemesi (`buyer_identity_contact_method_required`, `delivery_address_required`)
+
+Canlı bir checkout'ta e-posta ve adres işlenmedi. Kök nedeni canlı şema görülmeden kesinleştirilemedi. Olası iki neden var: mağaza şemasının farklı alan adları kullanması (örn. `email_address`, `address1`, iç içe `address`) ya da adresin yalnızca ikinci istekte (update) gönderilmesi ve o isteğin başarısız olması.
+
+Düzeltme:
+1. Alan adları şemadan çözümleniyor. Kanonik ad yoksa şemadaki eş anlamlı kullanılıyor, iç içe `address` destekleniyor ve her eşleme raporlanıyor.
+2. Mobil uç noktada adres, şema izin veriyorsa `create_checkout` içinde gönderiliyor.
+
+Bu mesajlar gelirse hem web özetinde (sessiz hata kontrolleri) hem de mobil özette açık uyarı gösteriliyor.
+
+## 12. Sonraki adımlar (kendi makinenizde)
 
 1. `npm run dev` → Hata ayıklama → Mağaza keşfi: `us.aabcollection.com`. `checkoutSchemaFacts.phonePlacement`, `attribution`, `supportsDiscounts` ve `supportsCartId` değerlerini bu dosyaya işleyin.
 2. Senaryoları 1→8 sırasıyla çalıştırın ve "Bulguları kopyala" çıktısını bu dosyaya ekleyin.

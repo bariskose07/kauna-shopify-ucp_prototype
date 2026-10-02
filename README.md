@@ -23,6 +23,10 @@ Birincil test mağazası **AAB** (`https://us.aabcollection.com`). Mariam yalnı
 - **429 / hız limiti:** Süre bitene kadar o uç noktaya istek gönderilmez; Satın al bu sırada Catalog'un `checkout_url`'ini açar (form dolu değil).
 - **Yedek:** Catalog'un verdiği `checkout_url` (mağazanın buy-now bağlantısı) ürün sayfasında ayrıca listelenir.
 
+## Mobil test uygulaması
+
+`mobile-harness/` — dört ödeme modunu (A: sadece UCP, B: mağaza sepeti, C: UCP + çerez, D: UCP + sca_ref) telefonda karşılaştıran Expo uygulaması. Kurulum ve senaryolar için bkz. `mobile-harness/README.md`. Uygulama yalnızca bu sunucunun **yeni** `POST /api/mobile/ucp-checkout` uç noktasıyla konuşur; mevcut uç noktalar değişmedi.
+
 ## Kurulum ve çalıştırma
 
 Gereksinim: Node.js ≥ 22.14.

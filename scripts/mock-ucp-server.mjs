@@ -195,7 +195,7 @@ function render(co) {
       { type: 'terms_of_service', url: `${ORIGIN}/policies/terms`, title: 'Terms' },
       { type: 'refund_policy', url: `${ORIGIN}/policies/refund`, title: 'Refunds' },
     ],
-    continue_url: `${ORIGIN}/checkouts/cn/${co.id.split('/').pop()}`,
+    continue_url: `${ORIGIN}/checkouts/cn/${co.id.split('/').pop().split('?')[0]}?key=${'c'.repeat(40)}`,
   }
 }
 
@@ -232,7 +232,8 @@ function call(name, a) {
       return { ucp: ucpMeta, ...cart, currency: 'USD', totals: [{ type: 'subtotal', amount: sub }, { type: 'total', amount: sub }] }
     }
     case 'create_checkout': {
-      const co = { id: `gid://shopify/Checkout/${randomUUID().slice(0, 8)}`, line_items: [] }
+      // Real shape: gid://shopify/Checkout/{TOKEN}?key={32-char KEY}
+      const co = { id: `gid://shopify/Checkout/hWN${randomUUID().replaceAll('-', '').slice(0, 20)}?key=${randomUUID().replaceAll('-', '')}`, line_items: [] }
       applyCheckout(co, a.checkout)
       checkouts.set(co.id, co)
       return render(co)
@@ -259,6 +260,35 @@ function call(name, a) {
   }
 }
 
+// ── storefront (for the mobile harness) ─────────────────────────────────────
+// A minimal Shopify-like storefront keyed by the `cart` cookie
+// ("{token}%3Fkey%3D{key}"), plus a stand-in for UpPromote's theme script:
+// when a product page is opened with ?sca_ref, the PAGE writes
+// attributes._up_click_id into the current cart. This exists only in the mock
+// so the harness's cookie/poll/restore logic can be exercised offline.
+const sfCarts = new Map() // token -> { token, key, attributes, items }
+function sfCartFromCookie(req, res) {
+  const raw = /(?:^|; )cart=([^;]*)/.exec(req.headers.cookie ?? '')?.[1]
+  const dec = raw ? decodeURIComponent(raw) : ''
+  const [token, key] = dec.split('?key=')
+  if (token) {
+    if (!sfCarts.has(token)) sfCarts.set(token, { token, key: key ?? '', attributes: {}, items: [] })
+    return sfCarts.get(token)
+  }
+  const c = { token: `sf${randomUUID().replaceAll('-', '').slice(0, 18)}`, key: randomUUID().replaceAll('-', ''), attributes: {}, items: [] }
+  sfCarts.set(c.token, c)
+  res.setHeader('Set-Cookie', `cart=${c.token}%3Fkey%3D${c.key}; Path=/; SameSite=Lax`)
+  return c
+}
+const sfJson = (c) => ({ token: `${c.token}?key=${c.key}`, attributes: c.attributes, item_count: c.items.reduce((a, i) => a + i.quantity, 0), items: c.items })
+function readBody(req) {
+  return new Promise((r) => {
+    let b = ''
+    req.on('data', (d) => (b += d))
+    req.on('end', () => r(b))
+  })
+}
+
 const server = createServer({ cert: readFileSync(process.env.MOCK_TLS_CERT), key: readFileSync(process.env.MOCK_TLS_KEY) }, (req, res) => {
   const send = (status, body) => {
     res.writeHead(status, { 'Content-Type': 'application/json' })
@@ -266,6 +296,27 @@ const server = createServer({ cert: readFileSync(process.env.MOCK_TLS_CERT), key
   }
   if (req.method === 'GET' && req.url === '/.well-known/ucp') {
     return send(200, { ucp: { version: V, services: { 'dev.ucp.shopping': [{ version: V, transport: 'mcp', endpoint: `${ORIGIN}/api/ucp/mcp` }] }, ...ucpMeta } })
+  }
+  if (req.method === 'GET' && req.url === '/cart.js') {
+    return send(200, sfJson(sfCartFromCookie(req, res)))
+  }
+  if (req.method === 'POST' && (req.url === '/cart/add.js' || req.url === '/cart/update.js')) {
+    const c = sfCartFromCookie(req, res)
+    readBody(req).then((b) => {
+      const j = JSON.parse(b || '{}')
+      if (req.url === '/cart/add.js') for (const it of j.items ?? []) c.items.push({ id: it.id, quantity: it.quantity })
+      if (j.attributes) Object.assign(c.attributes, j.attributes)
+      send(200, sfJson(c))
+    })
+    return
+  }
+  if (req.method === 'GET' && (req.url === '/' || req.url.startsWith('/products/'))) {
+    sfCartFromCookie(req, res)
+    res.writeHead(200, { 'Content-Type': 'text/html' })
+    // Mock of the affiliate theme script (mock only): on ?sca_ref, write a click id into the current cart.
+    return res.end(`<!doctype html><title>mock store</title><h1>${req.url}</h1><script>
+      if (new URLSearchParams(location.search).get('sca_ref')) setTimeout(() => fetch('/cart/update.js', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ attributes: { _up_click_id: 'mockclick-' + Date.now() } }) }), 700)
+    </script>`)
   }
   if (req.method === 'GET' && (req.url.startsWith('/checkouts/') || req.url.startsWith('/cart/'))) {
     res.writeHead(200, { 'Content-Type': 'text/html', 'X-Frame-Options': 'DENY' })

@@ -52,6 +52,8 @@ export interface SchemaFacts {
   buyerOpaque: boolean
   destinationKeys: string[]
   destinationOpaque: boolean
+  /** Keys of a nested `destinations[].address` object, when the schema has one. */
+  destinationAddressKeys: string[]
   supportsFulfillment: boolean
   supportsLineItemIds: boolean
   supportsGroups: boolean
@@ -86,6 +88,7 @@ export function schemaFacts(schema: unknown, op: 'create' | 'update'): SchemaFac
     buyerOpaque: buyer.opaque,
     destinationKeys: dest.keys,
     destinationOpaque: dest.opaque,
+    destinationAddressKeys: propertiesAt(s, 'checkout.fulfillment.methods[].destinations[].address').keys,
     supportsFulfillment: has('fulfillment.methods[]'),
     supportsLineItemIds: has('fulfillment.methods[].line_item_ids'),
     supportsGroups: has('fulfillment.methods[].groups[].selected_option_id'),
@@ -122,12 +125,60 @@ export interface BuildOutput {
   faultInjected: boolean
 }
 
-function pick(obj: Record<string, string>, keys: readonly string[], allowed: string[], opaque: boolean, where: string, notes: string[]): Json {
+// Field-name synonyms, used ONLY when the canonical UCP name is absent from
+// the business's live schema (seen live: `buyer_identity_contact_method_required`
+// / `delivery_address_required` although email/address were sent). The name
+// actually used always comes from the schema; nothing is sent blind.
+const SYNONYMS: Record<string, string[]> = {
+  email: ['email', 'email_address', 'contact_email'],
+  first_name: ['first_name', 'given_name', 'firstName'],
+  last_name: ['last_name', 'family_name', 'lastName'],
+  street_address: ['street_address', 'address1', 'address_line1', 'address_line_1', 'line1'],
+  address_locality: ['address_locality', 'city', 'locality'],
+  address_region: ['address_region', 'province_code', 'province', 'region', 'state', 'zone_code'],
+  postal_code: ['postal_code', 'zip', 'postcode'],
+  address_country: ['address_country', 'country_code', 'country'],
+}
+
+const ADDRESS_FIELDS = new Set(['street_address', 'address_locality', 'address_region', 'postal_code', 'address_country'])
+
+function resolveKey(k: string, allowed: string[]): string | undefined {
+  return (SYNONYMS[k] ?? [k]).find((c) => allowed.includes(c))
+}
+
+function pick(
+  obj: Record<string, string>,
+  keys: readonly string[],
+  allowed: string[],
+  opaque: boolean,
+  where: string,
+  notes: string[],
+  nested?: { key: string; keys: string[] },
+): Json {
   const out: Json = {}
   for (const k of keys) {
     if (!obj[k]) continue
-    if (opaque || allowed.includes(k)) out[k] = obj[k]
-    else notes.push(`${where}.${k} şemada yok → gönderilmedi`)
+    if (opaque) {
+      out[k] = obj[k]
+      continue
+    }
+    const direct = resolveKey(k, allowed)
+    if (direct) {
+      out[direct] = obj[k]
+      if (direct !== k) notes.push(`${where}.${k} → ${where}.${direct} (şemadaki ad)`)
+      continue
+    }
+    // Postal address nested as { address: { … } } in some renderings.
+    if (nested && ADDRESS_FIELDS.has(k)) {
+      const inner = resolveKey(k, nested.keys)
+      if (inner) {
+        const box = ((out[nested.key] as Json | undefined) ?? (out[nested.key] = {})) as Json
+        box[inner] = obj[k]
+        notes.push(`${where}.${k} → ${where}.${nested.key}.${inner} (şemadaki ad)`)
+        continue
+      }
+    }
+    notes.push(`${where}.${k} şemada yok → gönderilmedi`)
   }
   return out
 }
@@ -159,7 +210,15 @@ export function buildCheckoutBody({ draft, facts, last, cart, includeFulfillment
   // 3. fulfillment (destination + selected options)
   let faultInjected = false
   if (includeFulfillment && facts.supportsFulfillment) {
-    const dest = pick(b, DEST_FIELDS, facts.destinationKeys, facts.destinationOpaque, 'destination', notes)
+    const dest = pick(
+      b,
+      DEST_FIELDS,
+      facts.destinationKeys,
+      facts.destinationOpaque,
+      'destination',
+      notes,
+      facts.destinationAddressKeys.length ? { key: 'address', keys: facts.destinationAddressKeys } : undefined,
+    )
     if (draft.includePhone && b.phone && facts.phonePlacement.startsWith('fulfillment.')) {
       dest[facts.phonePlacement.split('.').pop() as string] = b.phone
     }
@@ -197,7 +256,7 @@ export function buildCheckoutBody({ draft, facts, last, cart, includeFulfillment
 
   // 5. attribution
   if (facts.attribution.supported) {
-    const all: Record<string, string> = { ...ATTRIBUTION }
+    const all: Record<string, string> = { ...ATTRIBUTION, ...(draft.attributionExtra ?? {}) }
     const eventKey = facts.attribution.open
       ? 'event_id'
       : EVENT_ID_KEYS.find((k) => facts.attribution.keys.includes(k))

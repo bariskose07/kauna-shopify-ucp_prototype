@@ -107,3 +107,79 @@ describe('withUtm', () => {
     expect(u.searchParams.get('key')).toBe('a')
   })
 })
+
+describe('field-name resolution from the live schema', () => {
+  const s = {
+    type: 'object',
+    properties: {
+      checkout: {
+        type: 'object',
+        properties: {
+          line_items: { type: 'array', items: { type: 'object' } },
+          buyer: { type: 'object', properties: { email_address: { type: 'string' }, first_name: { type: 'string' }, last_name: { type: 'string' } } },
+          fulfillment: {
+            type: 'object',
+            properties: {
+              methods: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    type: { type: 'string' },
+                    destinations: {
+                      type: 'array',
+                      items: {
+                        type: 'object',
+                        properties: {
+                          first_name: { type: 'string' },
+                          last_name: { type: 'string' },
+                          phone: { type: 'string' },
+                          address: {
+                            type: 'object',
+                            properties: { address1: {}, city: {}, province_code: {}, zip: {}, country_code: {} },
+                          },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  }
+
+  it('maps canonical names onto the schema’s names (incl. nested address)', () => {
+    const facts = schemaFacts(s, 'create')
+    expect(facts.phonePlacement).toBe('fulfillment.methods[].destinations[].phone')
+    const { body, notes } = buildCheckoutBody({
+      draft: draft({ phonePlacement: facts.phonePlacement }),
+      facts,
+      cart: { seller: 'x', cartSupported: false, lineItems: [{ item: { id: 'v' }, quantity: 1 }] },
+      includeFulfillment: true,
+    })
+    expect(body.buyer).toEqual({ email_address: 'test@example.com', first_name: 'Jane', last_name: 'Smith' })
+    const dest = (body.fulfillment as { methods: { destinations: Record<string, unknown>[] }[] }).methods[0].destinations[0]
+    expect(dest).toEqual({
+      first_name: 'Jane',
+      last_name: 'Smith',
+      phone: '+12125550123',
+      address: { address1: '123 Main Street', city: 'Brooklyn', province_code: 'NY', zip: '11201', country_code: 'US' },
+    })
+    expect(notes).toContain('buyer.email → buyer.email_address (şemadaki ad)')
+    expect(validate(s, { checkout: body }).unknownFields).toEqual([])
+  })
+
+  it('adds attributionExtra (mobile attempt id) to attribution', () => {
+    const facts = schemaFacts(updateCheckoutSchema(), 'update')
+    const { body } = buildCheckoutBody({
+      draft: draft({ attributionExtra: { utm_content: 'KAUNA-ATT-1' } }),
+      facts,
+      last: lastCheckout as unknown as CommerceObject,
+      includeFulfillment: true,
+    })
+    expect(body.attribution).toMatchObject({ utm_content: 'KAUNA-ATT-1', utm_source: 'kauna' })
+  })
+})

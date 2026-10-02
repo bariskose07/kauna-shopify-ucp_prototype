@@ -71,6 +71,8 @@ export interface CheckoutDraft {
   scenario?: string
   /** Fault injection for scenario 5 (deliberately wrong destination key). */
   injectWrongField: boolean
+  /** Extra attribution keys (e.g. mobile harness: utm_content = attempt id). */
+  attributionExtra?: Record<string, string>
   last?: CommerceObject
   /** Payload notes from the last build (dropped keys, attribution keys …). */
   buildNotes?: string[]

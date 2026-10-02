@@ -96,7 +96,10 @@ export async function prepare(ctx: Ctx): Promise<Prepared> {
       attempt.timings.ucpMs = Date.now() - t0
       attempt.checkoutIdMasked = sum.checkoutIdMasked
       attempt.status = sum.status
-      attempt.authModes = sum.auth.map((a) => `${a.step}:${a.auth?.mode ?? '?'}`).join(', ')
+      // "token yok – yedek" (test-only fallback) is flagged so it is never mistaken for the real path.
+      attempt.authModes = sum.auth
+        .map((a) => `${a.step}: ${a.auth?.mode === 'fallback' ? '⚠ ' : ''}${a.auth?.label ?? a.auth?.mode ?? '?'}`)
+        .join(', ')
       attempt.ucpMessages = sum.messages.map((m) => `${m.code ?? '?'}${m.severity ? `(${m.severity})` : ''}`).join(', ')
       ctx.onSummary(sum)
       done(st, true, `${sum.status} · ${attempt.authModes}`, t0)

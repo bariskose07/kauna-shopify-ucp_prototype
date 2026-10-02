@@ -67,6 +67,15 @@ export interface SchemaFacts {
   attribution: { supported: boolean; keys: string[]; open: boolean }
   supportsContext: boolean
   supportsCartId: boolean
+  /**
+   * Where `cart_id` goes, read from the schema. Shopify's flow puts it at the
+   * top level of the create_checkout arguments; some renderings nest it in
+   * `checkout`. 'none' → the checkout is built from explicit line items.
+   */
+  cartIdPlacement: 'top-level' | 'checkout' | 'none'
+  supportsCurrency: boolean
+  /** `line_items[].id` is listed (else lines are sent as {quantity, item: {id}}). */
+  supportsLineId: boolean
   methodRequired: string[]
 }
 
@@ -102,7 +111,10 @@ export function schemaFacts(schema: unknown, op: 'create' | 'update'): SchemaFac
       open: attr.keys.length === 0,
     },
     supportsContext: has('context'),
-    supportsCartId: has('cart_id'),
+    supportsCartId: has('cart_id') || pathStatus(s, 'cart_id') === 'present',
+    cartIdPlacement: pathStatus(s, 'cart_id') === 'present' ? 'top-level' : has('cart_id') ? 'checkout' : 'none',
+    supportsCurrency: has('currency'),
+    supportsLineId: has('line_items[].id'),
     methodRequired: requiredAt(s, 'checkout.fulfillment.methods[]'),
   }
 }
@@ -120,6 +132,8 @@ export interface BuildInput {
 
 export interface BuildOutput {
   body: Json
+  /** Arguments that sit next to `checkout` (e.g. top-level `cart_id`). */
+  topLevel: Json
   notes: string[]
   /** True when the body intentionally carries a non-schema key (scenario 5). */
   faultInjected: boolean
@@ -187,17 +201,27 @@ function pick(
 export function buildCheckoutBody({ draft, facts, last, cart, includeFulfillment }: BuildInput): BuildOutput {
   const notes: string[] = []
   const body: Json = {}
+  const topLevel: Json = {}
   const b = draft.buyer as unknown as Record<string, string>
 
-  // 1. line items
+  // 0. currency (PUT: resend what the business holds)
+  if (last?.currency && facts.supportsCurrency) body.currency = last.currency
+
+  // 1. line items — {quantity, item: {id}}; line id only if the schema lists it
   if (last) {
-    body.line_items = toRequestLines(last)
-  } else if (cart?.cartId && facts.supportsCartId) {
+    body.line_items = toRequestLines(last).map((l) => (facts.supportsLineId ? l : { quantity: l.quantity, item: { id: l.item.id } }))
+  } else if (cart?.cartId && facts.cartIdPlacement === 'top-level') {
+    topLevel.cart_id = cart.cartId
+    // The business takes the cart's content when both are present.
+    body.line_items = cart.lineItems.map((l) => ({ quantity: l.quantity, item: { id: l.item.id } }))
+    notes.push('Checkout sepetten oluşturuldu (üst düzey cart_id).')
+  } else if (cart?.cartId && facts.cartIdPlacement === 'checkout') {
     body.cart_id = cart.cartId
     body.line_items = [] // business uses the cart's lines when cart_id is present
-    notes.push('Checkout sepetten (cart_id) oluşturuldu.')
+    notes.push('Checkout sepetten oluşturuldu (checkout.cart_id).')
   } else {
-    body.line_items = (cart?.lineItems ?? []).map((l) => ({ item: l.item, quantity: l.quantity }))
+    if (cart?.cartId) notes.push('Şema cart_id içermiyor → checkout satırlarla (line_items) oluşturuldu.')
+    body.line_items = (cart?.lineItems ?? []).map((l) => ({ quantity: l.quantity, item: { id: l.item.id } }))
   }
 
   // 2. buyer
@@ -274,7 +298,7 @@ export function buildCheckoutBody({ draft, facts, last, cart, includeFulfillment
   // 6. context hint
   if (facts.supportsContext) body.context = { address_country: draft.buyer.address_country || 'US' }
 
-  return { body, notes, faultInjected }
+  return { body, topLevel, notes, faultInjected }
 }
 
 /** continue_url + the same UTM parameters used for attribution. */

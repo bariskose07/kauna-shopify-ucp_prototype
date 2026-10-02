@@ -3,6 +3,7 @@
 
 import { SCENARIOS } from './scenarios'
 import type { Observation, Session } from './session'
+import { getAuthSettings, getTokenState } from './ucp/client'
 
 function cell(s: string) {
   return s.replaceAll('|', '\\|').replaceAll('\n', ' ')
@@ -58,6 +59,26 @@ export function findingsMarkdown(s: Session): string {
       `  - continue_url host: ${c.last?.continue_url ? new URL(c.last.continue_url).host : '-'}`,
       ...(c.buildNotes ?? []).map((n) => `  - not: ${n}`),
     )
+  }
+  // Auth path per request (never the token; scopes/expiry only).
+  const t = getTokenState()
+  const st = getAuthSettings()
+  lines.push('', '### Kimlik doğrulama')
+  lines.push(
+    `- token: \`${t.status}\`${t.scopes?.length ? `, kapsamlar: ${t.scopes.map((x) => `\`${x}\``).join(', ')}` : ''}${t.expiresAt ? `, bitiş ${new Date(t.expiresAt).toISOString()}` : ''}`,
+    ...(t.error ? [`- token alınamadı: ${t.error.message}`] : []),
+    ...(t.rejected ? [`- AuthenticationFailed: ${t.rejected.host} (${t.rejected.tool}) ${t.rejected.at ? new Date(t.rejected.at).toISOString() : ''}`] : []),
+    `- test ayarları: token'sız yedek ${st.tokenlessFallback ? '**AÇIK**' : 'kapalı'}, CLI ${st.cliTransport ? '**AÇIK**' : 'kapalı'}`,
+  )
+  const calls = s.log.slice(-25)
+  if (calls.length) {
+    lines.push('', '| Saat | Araç | Uç nokta | Kimlik yolu | Sonuç |', '| --- | --- | --- | --- | --- |')
+    for (const e of calls) {
+      const host = e.endpoint ? new URL(e.endpoint).host : '-'
+      const label = e.auth ? `${e.auth.mode === 'fallback' ? '⚠ ' : ''}${e.auth.label ?? e.auth.mode}` : '-'
+      const err = e.error as { kind?: string; message?: string } | undefined
+      lines.push(`| ${e.at.slice(11, 19)} | ${e.tool} | ${host} | ${cell(label)} | ${err ? cell(`${err.kind}: ${String(err.message ?? '').slice(0, 120)}`) : 'ok'} |`)
+    }
   }
   const untagged = s.observations.filter((o) => !o.scenario)
   if (untagged.length) {

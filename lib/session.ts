@@ -28,9 +28,18 @@ export interface DebugEntry {
   error?: unknown
   validation?: unknown
   notes?: string[]
-  /** Identity tier used for this request (token / signed / anonymous / cli). */
-  auth?: { mode: string; note?: string }
+  /**
+   * Identity path: token / none ("token yok – tasarım gereği") /
+   * fallback ("token yok – yedek", test only) / cli. Never the token itself.
+   */
+  auth?: { mode: string; label?: string; note?: string; profile?: string; tokenScopes?: string[]; tokenExpiresAt?: number }
   surface?: string
+  /** Agent profile sent in meta["ucp-agent"].profile. */
+  profile?: string
+  /** structuredContent or content[0].text. */
+  payloadSource?: string
+  /** Masked raw MCP result (not kept for catalog calls — rule 3). */
+  raw?: unknown
 }
 
 /** Request-shaped line item (what we send back on every full-replace update). */

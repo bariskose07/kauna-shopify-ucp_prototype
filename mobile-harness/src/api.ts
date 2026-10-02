@@ -17,7 +17,7 @@ export interface UcpSummary {
   checkoutIdMasked: string
   cartToken?: string
   cartKey?: string
-  auth: { step: string; auth?: { mode: string; note?: string } }[]
+  auth: { step: string; auth?: { mode: string; label?: string; note?: string } }[]
   phonePlacement: string
   fieldNotes: string[]
   timings: Record<string, number>

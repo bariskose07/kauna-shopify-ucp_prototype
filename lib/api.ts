@@ -16,7 +16,7 @@ const HINTS: Record<string, string> = {
   not_offered: 'Mağaza bu işlemi sunmuyor.',
   schema: 'Ön kontrol: istek, mağazanın canlı şemasına uymadığı için GÖNDERİLMEDİ.',
   forbidden: 'Prototip güvenlik kuralı.',
-  auth: 'Shopify token alınamadı (SHOPIFY_CLIENT_ID/SECRET kontrol edin).',
+  auth: "Kimlik doğrulama: token alınamadı ya da mağaza token'ı reddetti (AuthenticationFailed). İstek token'sız tekrarlanmadı; bu yalnızca Ayarlar → \"Token reddedilirse token'sız dene (yalnızca test)\" ile açılır.",
   cli: 'UCP CLI adaptörü hata verdi.',
 }
 
@@ -40,10 +40,13 @@ export async function logged<T>(
       endpoint: r.trace.endpoint,
       auth: r.trace.auth,
       surface: r.trace.surface,
+      profile: r.trace.profile,
+      payloadSource: r.trace.payloadSource,
       durationMs: r.trace.durationMs,
       request: r.trace.request,
       // Rule 3: catalog responses are not kept on the server.
       response: opts.catalog ? '[Catalog yanıtı sunucuda saklanmaz — istemci panelinde gösterilir]' : r.trace.response,
+      raw: opts.catalog ? undefined : r.trace.raw,
       validation: r.trace.validation,
     })
     return r
@@ -55,6 +58,7 @@ export async function logged<T>(
       endpoint: t?.endpoint,
       auth: t?.auth,
       surface: t?.surface,
+      profile: t?.profile,
       durationMs: t?.durationMs,
       request: t?.request,
       validation: t?.validation,
@@ -73,7 +77,9 @@ export function errorJson(e: unknown, extra: Record<string, unknown> = {}) {
           ? 429
           : e.kind === 'not_offered'
             ? 404
-            : 502
+            : e.kind === 'auth'
+              ? 401
+              : 502
     const headers: Record<string, string> = {}
     if (e.retryAfterSeconds !== undefined) headers['Retry-After'] = String(e.retryAfterSeconds)
     const details = e.details as { trace?: CallTrace; validation?: unknown } | undefined

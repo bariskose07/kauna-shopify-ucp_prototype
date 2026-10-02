@@ -249,10 +249,15 @@ details.card[open] > summary::after { content: '－'; }
 .authbar .mode { color: var(--text); font-weight: 600; }
 .authbar .mode.token { color: var(--ok-line); }
 .authbar .mode.cli { color: var(--info-line); }
+.authbar .mode.fallback { color: var(--warn-line); }
+.authbar .mode.none { color: var(--muted); font-weight: 500; }
+.authbar .mode.fail { color: var(--danger-line); }
+.authbar-alert { background: var(--danger-bg); color: var(--text); border-bottom: 1px solid var(--danger-line); padding: 6px 16px; font-size: 13px; overflow-wrap: anywhere; }
+.authbar-alert.warn { background: var(--warn-bg); border-bottom-color: var(--warn-line); }
 .authbar .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; background: var(--line-strong); }
 .authbar .dot.good { background: var(--ok-line); }
 .authbar .dot.bad { background: var(--danger-line); }
 .authbar .dot.warn { background: var(--warn-line); }
 .authbar .rl { color: var(--text); }
-.authbar .bad-text { color: var(--danger-line); font-weight: 600; }
+.bad-text { color: var(--danger-line); font-weight: 600; }
 .authbar-details { max-width: 1080px; margin: 0 auto; padding: 4px 16px 10px; display: grid; gap: 4px; color: var(--text); max-height: 40vh; overflow-y: auto; }

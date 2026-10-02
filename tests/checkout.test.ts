@@ -183,3 +183,56 @@ describe('field-name resolution from the live schema', () => {
     expect(body.attribution).toMatchObject({ utm_content: 'KAUNA-ATT-1', utm_source: 'kauna' })
   })
 })
+
+describe('cart → checkout (Shopify flow)', () => {
+  const cart = {
+    seller: 'https://us.aabcollection.com',
+    cartId: 'gid://shopify/Cart/abc',
+    cartSupported: true,
+    lineItems: [{ id: 'li_1', item: { id: 'gid://shopify/ProductVariant/47830495854906' }, quantity: 1 }],
+  }
+  const createSchema = (topLevel: boolean) => ({
+    type: 'object',
+    properties: {
+      meta: { type: 'object' },
+      ...(topLevel ? { cart_id: { type: 'string' } } : {}),
+      checkout: {
+        type: 'object',
+        properties: {
+          ...(topLevel ? {} : { cart_id: { type: 'string' } }),
+          currency: { type: 'string' },
+          line_items: { type: 'array', items: { type: 'object', properties: { quantity: { type: 'integer' }, item: { type: 'object', properties: { id: { type: 'string' } } } } } },
+          buyer: { type: 'object', properties: { email: { type: 'string' } } },
+        },
+      },
+    },
+  })
+
+  it('top-level cart_id when the schema has it there', () => {
+    const f = schemaFacts(createSchema(true), 'create')
+    expect(f.cartIdPlacement).toBe('top-level')
+    const out = buildCheckoutBody({ draft: draft(), facts: f, cart, includeFulfillment: false })
+    expect(out.topLevel).toEqual({ cart_id: 'gid://shopify/Cart/abc' })
+    expect(out.body.cart_id).toBeUndefined()
+    expect(out.body.line_items).toEqual([{ quantity: 1, item: { id: 'gid://shopify/ProductVariant/47830495854906' } }])
+    expect(validate(createSchema(true), { ...out.topLevel, checkout: out.body }).unknownFields).toEqual([])
+  })
+
+  it('checkout.cart_id when nested; line items otherwise', () => {
+    expect(schemaFacts(createSchema(false), 'create').cartIdPlacement).toBe('checkout')
+    const none = schemaFacts({ type: 'object', properties: { checkout: { type: 'object', properties: { line_items: { type: 'array' } } } } }, 'create')
+    const out = buildCheckoutBody({ draft: draft(), facts: none, cart, includeFulfillment: false })
+    expect(none.cartIdPlacement).toBe('none')
+    expect(out.topLevel).toEqual({})
+    expect(out.notes.join(' ')).toMatch(/cart_id içermiyor/)
+  })
+
+  it('PUT body: currency + {quantity, item:{id}} lines from get_checkout (no line id unless listed)', () => {
+    const f = schemaFacts(createSchema(true), 'update')
+    const last = { id: 'co', currency: 'USD', line_items: [{ id: 'li_9', item: { id: 'v1' }, quantity: 2 }] } as unknown as CommerceObject
+    const out = buildCheckoutBody({ draft: draft(), facts: f, last, includeFulfillment: false })
+    expect(out.body.currency).toBe('USD')
+    expect(out.body.line_items).toEqual([{ quantity: 2, item: { id: 'v1' } }])
+    expect((out.body.buyer as Record<string, string>).email).toBe(DEFAULT_BUYER.email)
+  })
+})

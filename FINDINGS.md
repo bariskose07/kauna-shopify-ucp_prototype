@@ -95,7 +95,7 @@ Seçilen yol ve dört adayın şemadaki durumu (`present/absent/unknown`) checko
 ## 8. Canlı gözlemler (kullanıcının makinesinden)
 
 - Token (client credentials) + `SHOPIFY_CATALOG_URL` ile Global Catalog araması yanıt verdi.
-- **Token kapsamı:** Catalog token'ı (`Authorization: Bearer`) mağazanın uç noktasına da gönderildiğinde `aab-usa-v2.myshopify.com` her çağrıda JSON-RPC `-32000 AuthenticationFailed` döndü (arama ve Satın al → sepet). Token artık yalnızca Catalog uç noktasına gidiyor; mağazalara ucp-cli gibi yalnızca agent profili ile gidiliyor. İstenirse `SHOPIFY_TOKEN_FOR_MERCHANTS=1`.
+- **Token kapsamı:** Catalog token'ı (`Authorization: Bearer`) mağazanın uç noktasına da gönderildiğinde `aab-usa-v2.myshopify.com` her çağrıda JSON-RPC `-32000 AuthenticationFailed` döndü (arama ve Satın al → sepet). *(2026-10-02 itibarıyla geçersiz; bkz. §13.)* O zaman token yalnızca Catalog'a gönderilecek şekilde değiştirilmişti. Shopify'ın resmi akışına göre checkout araçları token **ister**, sepet araçları istemez. Prototip artık buna uyuyor; ret olursa açıkça raporluyor.
 - Global Catalog, AAB ürününü (`Green Tartan Maxi`, 134 $ USD, `…/54030028341562`, seçenekler: Dress length 52/54 in, Size XXS …) satıcı `aab-usa-v2.myshopify.com` ile ve `eligible.native_checkout: false` olarak döndürdü → escalation beklentisiyle uyumlu.
 - **Hız limiti (429):** Ürün sayfasındaki otomatik kargo tahmini her görüntülemede geçici bir checkout (create + update) açınca kısa sürede `HTTP 429`, `Retry-After: 3588` (≈ 1 saat) alındı. Checkout MCP limitleri gerçekten sıkı ve pencere saat mertebesinde. Önlemler: otomatik tahmin yalnızca Cart MCP ile; checkout ile tahmin yalnızca açık tıklamayla; tahminler sekme belleğinde tutuluyor; 429 sonrası süre bitene kadar o uç noktaya hiç istek gönderilmiyor (devre kesici); Satın al 429'da Catalog `checkout_url`'ine düşüyor (form dolu değil).
 - "Satıcı + ürün adı" (us.aabcollection.com): satıcının UCP araması yukarıdaki `idempotency-key` nedeniyle başlangıçta engellendi (düzeltildi). Global Catalog sonuçlarında AAB bulunmadı; `/products.json` yedeği sonuç verdi.
@@ -149,7 +149,7 @@ Kaynaklar: [Auth and rate limiting](https://shopify.dev/docs/agents/profiles/aut
 4. Token katmanında checkout için alıcı IP'si istenebiliyor (forumda "Missing required buyer IP header"). Kauna sunucusu alıcının IP'sini `signals` (ör. `dev.ucp.buyer_ip`) ile iletmeli. Tam alan adı canlı şemadan doğrulanmalı.
 5. Sayısal limitler ve katman yükseltme süreci Shopify'a sorulmalı: dakika/saat başına istek, mağaza başına mı toplam mı, 429 pencere süresi.
 
-**Uygulamada görünürlük:** Her UCP isteğinin kimlik yolu (token / imzalı / anonim / CLI yedeği) hata ayıklama panelinde rozet olarak ve sunucu logunda `[ucp] <araç> → <host> surface=… auth=…` satırı olarak görünüyor. Üst çubukta yüzey başına gösterge var (Global Catalog · Mağaza katalog · Sepet · Checkout). Token başarısız olursa nedeni gösteriliyor ve Global Catalog anonim devam ediyor; token en fazla dakikada bir yeniden deneniyor.
+**Uygulamada görünürlük:** §13'e bakın. Kimlik yolu artık `token` / `token yok – tasarım gereği` / `token yok – yedek` (yalnızca test) / `CLI (test)` olarak etiketleniyor. Token alınamazsa istek gönderilmiyor; anonim yedek yalnızca test ayarıyla açılıyor.
 
 ## 11. Alıcı/adres işlenmemesi (`buyer_identity_contact_method_required`, `delivery_address_required`)
 
@@ -163,6 +163,58 @@ Bu mesajlar gelirse hem web özetinde (sessiz hata kontrolleri) hem de mobil öz
 
 ## 12. Sonraki adımlar (kendi makinenizde)
 
+0. **Önce kimlik akışı:** `node --env-file=.env scripts/verify-auth-flow.mjs` çalıştırın, üretilen `verify-auth-report.md` tablosunu §13.3'e yapıştırın (bkz. §13).
+
 1. `npm run dev` → Hata ayıklama → Mağaza keşfi: `us.aabcollection.com`. `checkoutSchemaFacts.phonePlacement`, `attribution`, `supportsDiscounts` ve `supportsCartId` değerlerini bu dosyaya işleyin.
 2. Senaryoları 1→8 sırasıyla çalıştırın ve "Bulguları kopyala" çıktısını bu dosyaya ekleyin.
 3. Mod A'da `ec.start` gelip gelmediğini ve `ec.error` içeriğini kaydedin.
+
+## 13. Resmi kimlik doğrulama akışına geçiş (2026-10-02)
+
+Kaynak: Shopify "Authenticate your agent" (6 adım + her sayfanın "Next steps" kısmı). Sayfalar bu ortamdan açılamadı; uygulanan desen kullanıcının özetinden alındı.
+
+### 13.1 Ne değişti
+
+| Konu | Önce | Şimdi |
+| --- | --- | --- |
+| Checkout araçları | token **gönderilmiyordu** (canlıda `AuthenticationFailed` görüldüğü için) | `Bearer` token gönderiliyor (`create/get/update/cancel_checkout`) |
+| Sepet araçları, mağaza kataloğu | anonim | token yok — *tasarım gereği* (etiketli) |
+| Token alınamazsa | Global Catalog sessizce anonim devam ediyordu | İstek **gönderilmiyor**. Kalıcı band "Token alınamadı: <neden>", panelde ve günlükte hata |
+| Mağaza token'ı reddederse | — | `AuthenticationFailed` arayüzde ve panelde açıkça. Token'sız tekrar **yok**. Yalnızca Ayarlar → "Token reddedilirse token'sız dene (yalnızca test)" ile bir kez tekrar, `token yok – yedek ⚠` etiketiyle |
+| CLI adaptörü | `UCP_TRANSPORT=cli` | Yalnızca test ayarı (Ayarlar veya aynı env) |
+| Token yenileme | 5 dk erken | `exp`'ten 1 dk önce. JWT `scopes` / `exp` / `limits` okunup panelde gösteriliyor |
+| Kimlik bilgisi adları | `SHOPIFY_CLIENT_ID/SECRET` | aynı + eski adlar uyarıyla okunuyor |
+| Profil | her çağrıda `/{sürüm}/valid-with-capabilities.json` | katalog: `examples/2026-08-25/valid-with-capabilities.json`; sepet/checkout: `examples/2026-08-25/cart-and-checkout.json` (veya cart+checkout ilan eden `UCP_AGENT_PROFILE_URL`) |
+| Başlık | — | her JSON-RPC isteğinde `MCP-Protocol-Version: 2026-03-26` |
+| `cart_id` | `checkout.cart_id` + `line_items: []` | şema üst düzeyde listeliyorsa **üst düzey** `cart_id` + sepet satırları; `checkout` içinde listeliyorsa orada; hiç yoksa satırlarla (not düşülür) |
+| `update_checkout` | son yanıttan tam gövde | önce `get_checkout`, sonra tam PUT (`currency`, `context`, `line_items` `{quantity, item:{id}}`, `buyer` …) |
+| Katalog kimliği | `catalog.saved_catalog_slug` | `catalog.catalog_id` |
+| Mağaza uç noktası | yalnızca `/.well-known/ucp` | `/.well-known/ucp`, okunamazsa `{mağaza}/api/ucp/mcp` |
+| İptal | yok | `cancel_checkout` (Checkout sayfasında "Checkout'u iptal et"). `complete_checkout` hâlâ yasak |
+| Teşhis | rozet | istek başına araç, uç nokta, kimlik yolu etiketi, profil, token kapsamları + bitiş, yanıt kaynağı (`structuredContent` / `content[0].text`), maskeli ham yanıt; "Bulguları kopyala" çıktısına kimlik tablosu eklendi |
+
+`/api/mobile/ucp-checkout` aynı istemciyi kullandığı için aynı kurallara uyuyor (checkout token'lı; adres güncellemesinden önce `get_checkout`). Mobil test günlüğünde kimlik yolu etiketleri gösteriliyor; yedek çağrılar ⚠ ile işaretli.
+
+### 13.2 Bu ortamda doğrulananlar (sahte sunucu)
+
+Sahte sunucu artık kuralı katı uyguluyor: checkout token'sız → hata, sepete token gelirse → hata, Global Catalog örneği token ister, `MCP-Protocol-Version` zorunlu.
+
+- `scripts/verify-auth-flow.mjs` sahte sunucuya karşı: 7/7 adım ✓ (token → katalog → keşif → `create_cart` token'sız → `create_checkout` token'lı, üst düzey `cart_id` → `get_checkout` + `update_checkout` `buyer.email` → `cancel_checkout`).
+- `MOCK_REJECT_TOKEN=1` ile: adım 5 `AuthenticationFailed` olarak raporlandı, token'sız tekrar yok, sonraki adımlar atlandı.
+- Web: 55 birim testi (11'i yeni kimlik testi), uçtan uca 56/56 (mobil + masaüstü koyu). Sahte sunucu günlüğü: `create_cart auth=none` ×7, `create/get/update/cancel_checkout auth=bearer`. Kural dışı tek istek yok.
+- Token hatası senaryosu (tarayıcıda): arama durdu, kalıcı band "Token alınamadı: HTTP 404 — not found", durum satırı `Global Catalog: token ✗ · Mağaza katalog: token yok (tasarım gereği) · Sepet: token yok (tasarım gereği) · Checkout: token ✗`. Test ayarı açılınca çağrı `token yok – yedek` olarak işaretlendi.
+- Mobil: TypeScript temiz, `expo export` Android + iOS ✓; `/api/mobile/ucp-checkout` → `create_checkout: token`.
+
+### 13.3 Canlı doğrulama (sizin Mac'inizde)
+
+```bash
+node --env-file=.env scripts/verify-auth-flow.mjs
+```
+
+Çıktıdaki tabloyu buraya yapıştırın. Özellikle 5. adım önemli: AAB (`aab-usa-v2.myshopify.com`) Dev Dashboard token'ını checkout'ta kabul ediyor mu? 2026-09-29'da reddetmişti (§8).
+
+- **Reddederse:** token'ın kapsamı (1. adımdaki `scopes`) checkout için yetersiz olabilir. Dev Dashboard'da checkout kapsamı ya da Shopify'dan erişim gerekebilir. Bu, "Next steps" sayfalarındaki onay sürecine bağlı. Uygulama bu durumda checkout'u durdurur ve hatayı gösterir.
+- **Sadece test için:** Ayarlar'daki yedek açılarak eski davranış (token'sız) denenebilir.
+
+_(sonuçlar bekleniyor)_
+

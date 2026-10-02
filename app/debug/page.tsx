@@ -1,6 +1,7 @@
 'use client'
 import { useEffect, useState, useSyncExternalStore } from 'react'
 
+import type { AuthStatusData } from '@/components/AuthStatus'
 import { ApiFailure, api, getClientLog, subscribeClientLog } from '@/lib/browser'
 import type { DebugEntry, Observation } from '@/lib/session'
 import { AAB_US } from '@/lib/scenarios'
@@ -26,7 +27,11 @@ export default function DebugPage() {
   const [err, setErr] = useState<string | null>(null)
   const clientLog = useSyncExternalStore(subscribeClientLog, getClientLog, getClientLog)
 
-  const refresh = () => void api<typeof data>('/api/debug').then(setData)
+  const [auth, setAuth] = useState<AuthStatusData | null>(null)
+  const refresh = () => {
+    void api<typeof data>('/api/debug').then(setData)
+    void api<AuthStatusData>('/api/auth-status').then(setAuth)
+  }
   useEffect(refresh, [])
 
   async function copyFindings() {
@@ -111,6 +116,70 @@ export default function DebugPage() {
         </div>
       ))}
 
+      <h2>Kimlik doğrulama</h2>
+      <div className="card small">
+        {auth ? (
+          <table className="totals">
+            <tbody>
+              <tr>
+                <td>Token durumu</td>
+                <td>
+                  <b>{auth.token.status}</b>
+                  {auth.token.credentialSource ? <span className="muted"> · {auth.token.credentialSource}</span> : null}
+                  {auth.token.error ? <div className="bad-text">Token alınamadı: {auth.token.error.message}</div> : null}
+                  {auth.token.warning ? <div className="muted">{auth.token.warning}</div> : null}
+                </td>
+              </tr>
+              <tr>
+                <td>Kapsamlar (scopes)</td>
+                <td className="mono">{auth.token.scopes?.length ? auth.token.scopes.join(' ') : '—'}</td>
+              </tr>
+              <tr>
+                <td>Bitiş (exp)</td>
+                <td className="mono">
+                  {auth.token.expiresAt ? `${new Date(auth.token.expiresAt).toLocaleString()} (${auth.token.expiresInMin} dk)` : '—'}
+                </td>
+              </tr>
+              <tr>
+                <td>Limitler (limits)</td>
+                <td>
+                  <pre style={{ margin: 0 }}>{auth.token.limits ? JSON.stringify(auth.token.limits, null, 2) : '—'}</pre>
+                </td>
+              </tr>
+              <tr>
+                <td>Son ret</td>
+                <td>
+                  {auth.token.rejected
+                    ? `${new Date(auth.token.rejected.at).toLocaleTimeString()} · ${auth.token.rejected.host} · ${auth.token.rejected.tool}: ${auth.token.rejected.message}`
+                    : '—'}
+                </td>
+              </tr>
+              <tr>
+                <td>Test ayarları</td>
+                <td>
+                  token’sız yedek: <b>{auth.settings.tokenlessFallback ? 'AÇIK' : 'kapalı'}</b> · CLI:{' '}
+                  <b>{auth.settings.cliTransport ? 'AÇIK' : 'kapalı'}</b>
+                </td>
+              </tr>
+              <tr>
+                <td>Yüzeyler</td>
+                <td>
+                  {auth.surfaces.map((x) => (
+                    <div key={x.surface}>
+                      {x.label}: <b>{x.expectedLabel}</b>
+                      {x.blocked ? ' — gönderilmeyecek' : ''}
+                    </div>
+                  ))}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        ) : (
+          '…'
+        )}
+        <p className="muted">Token’ın kendisi hiçbir yerde gösterilmez; yalnızca içindeki kapsam, bitiş ve limit bilgileri okunur.</p>
+      </div>
+
       <h2>UCP istekleri (sunucu, kişisel veriler maskeli)</h2>
       <div className="card small">
         {[...(data?.log ?? [])].reverse().map((e) => (
@@ -120,8 +189,12 @@ export default function DebugPage() {
               {e.seller && <span className="muted">{e.seller.replace('https://', '')}</span>}{' '}
               {e.durationMs !== undefined && <span className="muted">{e.durationMs} ms</span>}{' '}
               {e.auth && (
-                <span className={`badge ${e.auth.mode === 'token' ? 'ok' : ''}`} title={e.auth.note ?? ''}>
-                  {{ token: 'token', signed: 'imzalı', anonymous: 'anonim', cli: 'CLI yedeği' }[e.auth.mode] ?? e.auth.mode}
+                <span
+                  className={`badge ${e.auth.mode === 'token' ? 'ok' : e.auth.mode === 'fallback' ? 'warn' : ''}`}
+                  title={e.auth.note ?? ''}
+                >
+                  {e.auth.mode === 'fallback' ? '⚠ ' : ''}
+                  {e.auth.label ?? e.auth.mode}
                 </span>
               )}{' '}
               {e.error ? <span className="badge danger">hata</span> : null}
@@ -129,11 +202,23 @@ export default function DebugPage() {
             {e.endpoint && <div className="mono">{e.endpoint}</div>}
             {e.auth && (
               <div>
-                Kimlik yolu: <b>{e.auth.mode}</b>
+                Kimlik yolu: <b>{e.auth.label ?? e.auth.mode}</b>
                 {e.surface ? ` · yüzey: ${e.surface}` : ''}
                 {e.auth.note ? ` · ${e.auth.note}` : ''}
               </div>
             )}
+            {(e.profile ?? e.auth?.profile) && (
+              <div>
+                Profil: <span className="mono">{e.profile ?? e.auth?.profile}</span>
+              </div>
+            )}
+            {e.auth?.mode === 'token' && (
+              <div>
+                Token kapsamları: <span className="mono">{e.auth.tokenScopes?.join(' ') || '—'}</span>
+                {e.auth.tokenExpiresAt ? ` · bitiş ${new Date(e.auth.tokenExpiresAt).toLocaleTimeString()}` : ''}
+              </div>
+            )}
+            {e.payloadSource && <div>Yanıt kaynağı: {e.payloadSource}</div>}
             {e.notes?.map((n) => <div key={n}>{n}</div>)}
             <div>İstek:</div>
             <pre>{JSON.stringify(e.request ?? null, null, 2)}</pre>
@@ -145,6 +230,12 @@ export default function DebugPage() {
             ) : null}
             <div>{e.error ? 'Hata:' : 'Yanıt:'}</div>
             <pre>{JSON.stringify(e.error ?? e.response ?? null, null, 2)}</pre>
+            {e.raw ? (
+              <details>
+                <summary>Ham MCP yanıtı (maskeli)</summary>
+                <pre>{JSON.stringify(e.raw, null, 2)}</pre>
+              </details>
+            ) : null}
           </details>
         ))}
         {data?.log.length === 0 && <p className="muted">Kayıt yok.</p>}

@@ -1,14 +1,17 @@
 // UCP transport: discovery, auth, JSON-RPC 2.0 over HTTPS, error separation.
 //
-// Auth path (see README "Kimlik doğrulama"):
-//   1. SHOPIFY_CLIENT_ID + SHOPIFY_CLIENT_SECRET → bearer token from
-//      https://api.shopify.com/auth/access_token (cached ~60 min).
-//   2. Otherwise → exactly what @shopify/ucp-cli does. Reading its source
-//      (src/core/mcp-client.ts, operation.ts) shows there is NO request signing:
-//      the agent's identity is the profile URL sent in
-//      `params.arguments.meta["ucp-agent"].profile`, which the business fetches
-//      to negotiate. We replicate that byte-for-byte.
-//   3. UCP_TRANSPORT=cli → shell out to the CLI (cli-adapter.ts).
+// Auth follows Shopify's "Authenticate your agent" flow (README "Kimlik
+// doğrulama"):
+//   • SHOPIFY_CLIENT_ID + SHOPIFY_CLIENT_SECRET → client_credentials JWT from
+//     https://api.shopify.com/auth/access_token (60 min; refreshed 1 min early).
+//   • Per call:  Global Catalog      → Authorization: Bearer <token>
+//                merchant catalog    → no token (by design)
+//                cart tools          → no token (by design)
+//                checkout tools      → Authorization: Bearer <token>
+//   • No silent fallback: a missing or rejected token is an error unless the
+//     test-only setting "token'sız dene" is on, and then every such call is
+//     labelled "token yok – yedek".
+//   • CLI adapter (cli-adapter.ts) only when the test setting selects it.
 //
 // Server-only module: never import from a client component.
 
@@ -25,8 +28,14 @@ import type { Json, UcpMeta } from './types'
 const FORBIDDEN_TOOLS: ReadonlySet<string> = new Set(['complete_checkout'])
 
 export const SUPPORTED_VERSIONS = ['2026-08-25', '2026-04-08'] as const
-const SHOPIFY_SAMPLE_PROFILE = (v: string) =>
-  `https://shopify.dev/ucp/agent-profiles/${v}/valid-with-capabilities.json`
+/** MCP transport revision sent on every JSON-RPC request. */
+export const MCP_PROTOCOL_VERSION = '2026-03-26'
+/** Shopify's example agent profiles (Authenticate your agent, steps 3–5). */
+export const CATALOG_PROFILE = 'https://shopify.dev/ucp/agent-profiles/examples/2026-08-25/valid-with-capabilities.json'
+export const CART_CHECKOUT_PROFILE = 'https://shopify.dev/ucp/agent-profiles/examples/2026-08-25/cart-and-checkout.json'
+const TOKEN_URL_DEFAULT = 'https://api.shopify.com/auth/access_token'
+/** Checkout tools carry the Bearer token; cart tools never do. */
+export const CHECKOUT_TOOLS: ReadonlySet<string> = new Set(['create_checkout', 'get_checkout', 'update_checkout', 'cancel_checkout'])
 
 const USER_AGENT = 'kauna-ucp-prototype/0.1 (+https://kauna.ai)'
 const TIMEOUT_MS = 30_000
@@ -44,52 +53,153 @@ function catalogEndpoint(): string | undefined {
   }
 }
 
+// ─── runtime test settings (Ayarlar → "Kimlik (yalnızca test)") ────────────
+// Both default OFF. Seeded from env so scripts can flip them, changeable at
+// runtime from the settings page. Kept in memory only.
+export interface AuthSettings {
+  /** Token missing/rejected → retry the same call without it (test only). */
+  tokenlessFallback: boolean
+  /** Route every call through @shopify/ucp-cli (test only). */
+  cliTransport: boolean
+}
+const settings: AuthSettings = ((globalThis as unknown as { __ucpAuthSettings?: AuthSettings }).__ucpAuthSettings ??= {
+  tokenlessFallback: process.env.UCP_TOKENLESS_FALLBACK === '1',
+  cliTransport: process.env.UCP_TRANSPORT === 'cli',
+})
+export function getAuthSettings(): AuthSettings {
+  return { ...settings }
+}
+export function setAuthSettings(patch: Partial<AuthSettings>): AuthSettings {
+  if (typeof patch.tokenlessFallback === 'boolean') settings.tokenlessFallback = patch.tokenlessFallback
+  if (typeof patch.cliTransport === 'boolean') settings.cliTransport = patch.cliTransport
+  console.info(`[ucp] test ayarları: token'sız yedek=${settings.tokenlessFallback ? 'AÇIK' : 'kapalı'} cli=${settings.cliTransport ? 'AÇIK' : 'kapalı'}`)
+  return getAuthSettings()
+}
+
+// ─── credentials ─────────────────────────────────────────────────────────────
+// One source of truth: SHOPIFY_CLIENT_ID / SHOPIFY_CLIENT_SECRET. Older names
+// are still read so an existing .env keeps working, with a warning.
+const LEGACY_CREDENTIALS: [string, string][] = [
+  ['SHOPIFY_API_KEY', 'SHOPIFY_API_SECRET'],
+  ['UCP_CLIENT_ID', 'UCP_CLIENT_SECRET'],
+  ['CLIENT_ID', 'CLIENT_SECRET'],
+]
+let legacyWarned = false
+export function credentials(): { id?: string; secret?: string; source?: string; warning?: string } {
+  const id = process.env.SHOPIFY_CLIENT_ID
+  const secret = process.env.SHOPIFY_CLIENT_SECRET
+  if (id && secret) return { id, secret, source: 'SHOPIFY_CLIENT_ID/SECRET' }
+  for (const [ki, ks] of LEGACY_CREDENTIALS) {
+    if (process.env[ki] && process.env[ks]) {
+      const warning = `Eski değişken adları kullanılıyor (${ki}/${ks}). .env içinde SHOPIFY_CLIENT_ID/SHOPIFY_CLIENT_SECRET olarak yeniden adlandırın.`
+      if (!legacyWarned) {
+        legacyWarned = true
+        console.warn(`[ucp] ${warning}`)
+      }
+      return { id: process.env[ki], secret: process.env[ks], source: `${ki}/${ks}`, warning }
+    }
+  }
+  return {}
+}
+
 export function config() {
+  const creds = credentials()
   return {
-    transport: (process.env.UCP_TRANSPORT ?? 'auto') === 'cli' ? ('cli' as const) : ('direct' as const),
-    hasClientCredentials: Boolean(process.env.SHOPIFY_CLIENT_ID && process.env.SHOPIFY_CLIENT_SECRET),
+    transport: settings.cliTransport ? ('cli' as const) : ('direct' as const),
+    hasClientCredentials: Boolean(creds.id && creds.secret),
+    /** Optional own profile for cart + checkout (used only if it declares both). */
     profileOverride: process.env.UCP_AGENT_PROFILE_URL || undefined,
     // SHOPIFY_CATALOG_URL (Dev Dashboard) is the MCP endpoint itself, e.g.
     // https://catalog.shopify.com/api/ucp/mcp; its origin is the catalog business.
     catalogUrl: catalogEndpoint() ? new URL(catalogEndpoint() as string).origin : process.env.UCP_CATALOG_URL || 'https://catalog.shopify.com',
     catalogEndpoint: catalogEndpoint(),
-    /** Dev Dashboard catalog id — sent as `saved_catalog_slug` (see catalog.ts). */
+    /** Dev Dashboard catalog id — sent as `catalog.catalog_id` (see catalog.ts). */
     catalogId: process.env.SHOPIFY_CATALOG_ID || undefined,
     defaultSeller: process.env.DEFAULT_SELLER || 'https://us.aabcollection.com',
     maxRetryAfter: Number(process.env.UCP_MAX_RETRY_AFTER_SECONDS ?? 5),
+    /** Overridable only so the offline mock can stand in for api.shopify.com. */
+    tokenUrl: process.env.SHOPIFY_AUTH_URL || TOKEN_URL_DEFAULT,
   }
 }
 
-// ─── auth: client-credentials token (path 1) ────────────────────────────────
+// ─── auth: client-credentials token ─────────────────────────────────────────
+
+/** Claims we read from the token (payload only; the signature is Shopify's business). */
+export interface TokenClaims {
+  scopes: string[]
+  /** epoch seconds */
+  exp?: number
+  limits?: unknown
+}
+
+interface CachedToken {
+  token: string
+  expiresAt: number
+  obtainedAt: number
+  claims: TokenClaims
+}
 
 const g = globalThis as unknown as {
-  __ucpToken?: { token: string; expiresAt: number }
+  __ucpToken?: CachedToken
   __ucpDisc?: Map<string, { at: number; value: Discovered }>
   __ucpTools?: Map<string, { at: number; value: Record<string, ToolDescriptor> }>
 }
 const discCache = (g.__ucpDisc ??= new Map())
 const toolsCache = (g.__ucpTools ??= new Map())
 
+const REFRESH_EARLY_MS = 60_000
+const TOKEN_RETRY_MS = 60_000
+
+/** Decode a JWT payload (no verification — display and expiry only). */
+export function decodeJwt(token: string): TokenClaims {
+  try {
+    const part = token.split('.')[1]
+    if (!part) return { scopes: [] }
+    const json = JSON.parse(Buffer.from(part.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8')) as Json
+    const raw = json.scopes ?? json.scope ?? json.scp
+    const scopes = Array.isArray(raw) ? raw.map(String) : typeof raw === 'string' ? raw.split(/[\s,]+/).filter(Boolean) : []
+    return { scopes, exp: typeof json.exp === 'number' ? json.exp : undefined, limits: json.limits }
+  } catch {
+    return { scopes: [] }
+  }
+}
+
 let tokenInFlight: Promise<string | undefined> | undefined
 
+/**
+ * The single token getter. Returns undefined only when no credentials are
+ * configured; any exchange failure throws (and is remembered for the banner).
+ */
 export async function getAccessToken(): Promise<string | undefined> {
-  const id = process.env.SHOPIFY_CLIENT_ID
-  const secret = process.env.SHOPIFY_CLIENT_SECRET
+  const { id, secret } = credentials()
   if (!id || !secret) return undefined
   const cached = g.__ucpToken
-  // Refresh 5 minutes early; tokens are documented as valid for 60 minutes.
-  if (cached && cached.expiresAt - 5 * 60_000 > Date.now()) return cached.token
-  // Parallel catalog calls share one token request.
-  tokenInFlight ??= fetchToken(id, secret).finally(() => {
-    tokenInFlight = undefined
-  })
+  if (cached && cached.expiresAt - REFRESH_EARLY_MS > Date.now()) return cached.token
+  // Don't hammer the token endpoint after a failure: at most once a minute.
+  if (tokenState.error && Date.now() - tokenState.error.at < TOKEN_RETRY_MS) {
+    throw new UcpError({ kind: 'auth', httpStatus: tokenState.error.httpStatus, message: tokenState.error.message })
+  }
+  // Parallel calls share one token request.
+  tokenInFlight ??= fetchToken(id, secret)
+    .then((t) => {
+      tokenState.error = undefined
+      return t
+    })
+    .catch((e: UcpError) => {
+      tokenState.error = { at: Date.now(), message: e.message, httpStatus: e.httpStatus }
+      console.warn(`[ucp] token alınamadı: ${e.message}`)
+      throw e
+    })
+    .finally(() => {
+      tokenInFlight = undefined
+    })
   return tokenInFlight
 }
 
-async function fetchToken(id: string, secret: string): Promise<string | undefined> {
+async function fetchToken(id: string, secret: string): Promise<string> {
   let res: Response
   try {
-    res = await fetch('https://api.shopify.com/auth/access_token', {
+    res = await fetch(config().tokenUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Accept: 'application/json', 'User-Agent': USER_AGENT },
       body: JSON.stringify({ client_id: id, client_secret: secret, grant_type: 'client_credentials' }),
@@ -97,11 +207,12 @@ async function fetchToken(id: string, secret: string): Promise<string | undefine
     })
   } catch (e) {
     // Network failure, not bad credentials.
-    throw new UcpError({ kind: 'network', message: `api.shopify.com token isteğine ulaşılamadı: ${(e as Error).message}` })
+    throw new UcpError({ kind: 'auth', message: `token uç noktasına ulaşılamadı (${new URL(config().tokenUrl).host}): ${(e as Error).message}` })
   }
   const body = (await res.json().catch(() => ({}))) as {
     access_token?: string
     expires_in?: number
+    scope?: string
     error?: string
     error_description?: string
     message?: string
@@ -113,14 +224,27 @@ async function fetchToken(id: string, secret: string): Promise<string | undefine
     throw new UcpError({
       kind: 'auth',
       httpStatus: res.status,
-      message: `Token alınamadı (HTTP ${res.status})${why ? ` — ${why.slice(0, 200)}` : ''}`,
+      message: `HTTP ${res.status}${why ? ` — ${why.slice(0, 200)}` : ''}`,
     })
   }
+  const claims = decodeJwt(body.access_token)
+  if (claims.scopes.length === 0 && body.scope) claims.scopes = body.scope.split(/[\s,]+/).filter(Boolean)
+  const now = Date.now()
   g.__ucpToken = {
     token: body.access_token,
-    expiresAt: Date.now() + (body.expires_in ?? 3600) * 1000,
+    obtainedAt: now,
+    expiresAt: claims.exp ? claims.exp * 1000 : now + (body.expires_in ?? 3600) * 1000,
+    claims,
   }
+  console.info(
+    `[ucp] token alındı: scopes=[${claims.scopes.join(' ')}] exp=${new Date(g.__ucpToken.expiresAt).toISOString()} token=${maskToken(body.access_token)}`,
+  )
   return body.access_token
+}
+
+/** Only ever show a token as its first 6 characters. */
+export function maskToken(t: string | undefined): string {
+  return t ? `${t.slice(0, 6)}…(${t.length})` : '—'
 }
 
 // ─── discovery ───────────────────────────────────────────────────────────────
@@ -128,10 +252,13 @@ async function fetchToken(id: string, secret: string): Promise<string | undefine
 export interface Discovered {
   business: string
   version: string
-  source: 'well-known' | 'supported_versions'
+  source: 'well-known' | 'supported_versions' | 'fallback'
   businessProfileUrl: string
   endpoint: string
+  /** Profile sent with tools/list on this endpoint (per-call profile: profileFor()). */
   agentProfileUrl: string
+  /** Why discovery fell back to {origin}/api/ucp/mcp, if it did. */
+  note?: string
   capabilities: unknown
   paymentHandlers: unknown
   /** Full business profile (not catalog data — safe to keep briefly). */
@@ -206,7 +333,7 @@ export async function discover(businessUrl: string, force = false): Promise<Disc
       source: base?.source ?? 'well-known',
       businessProfileUrl: base?.businessProfileUrl ?? '(SHOPIFY_CATALOG_URL — keşif atlandı)',
       endpoint: explicit,
-      agentProfileUrl: config().profileOverride ?? SHOPIFY_SAMPLE_PROFILE(version),
+      agentProfileUrl: CATALOG_PROFILE,
       capabilities: base?.capabilities,
       paymentHandlers: base?.paymentHandlers,
       profile: base?.profile ?? {},
@@ -214,7 +341,28 @@ export async function discover(businessUrl: string, force = false): Promise<Disc
     discCache.set(origin, { at: Date.now(), value })
     return value
   }
-  const value = await discoverWellKnown(origin)
+  let value: Discovered
+  try {
+    value = await discoverWellKnown(origin)
+  } catch (e) {
+    // /.well-known/ucp unreachable or without an MCP entry → Shopify's
+    // standard path. A version mismatch is a real incompatibility: no fallback.
+    if (!(e instanceof UcpError) || (e.kind !== 'discovery' && e.kind !== 'network') || /Ortak UCP sürümü yok/.test(e.message)) throw e
+    const endpoint = `${origin}/api/ucp/mcp`
+    console.warn(`[ucp] keşif başarısız (${e.message.slice(0, 120)}) → ${endpoint}`)
+    value = {
+      business: origin,
+      version: process.env.UCP_CATALOG_VERSION ?? SUPPORTED_VERSIONS[0],
+      source: 'fallback',
+      businessProfileUrl: `${origin}/.well-known/ucp (okunamadı)`,
+      endpoint,
+      agentProfileUrl: await merchantToolsProfile(),
+      capabilities: undefined,
+      paymentHandlers: undefined,
+      profile: {},
+      note: `/.well-known/ucp okunamadı → ${endpoint} kullanıldı: ${e.message.slice(0, 200)}`,
+    }
+  }
   discCache.set(origin, { at: Date.now(), value })
   return value
 }
@@ -273,7 +421,9 @@ async function discoverWellKnown(origin: string): Promise<Discovered> {
     source,
     businessProfileUrl: profileUrl,
     endpoint: entry.endpoint,
-    agentProfileUrl: config().profileOverride ?? SHOPIFY_SAMPLE_PROFILE(version),
+    // tools/list on a merchant endpoint uses the cart+checkout profile (the
+    // tools Kauna needs there); the catalog endpoint uses the catalog profile.
+    agentProfileUrl: isCatalogEndpoint(entry.endpoint) ? CATALOG_PROFILE : await merchantToolsProfile(),
     capabilities: ucp.capabilities,
     paymentHandlers: ucp.payment_handlers,
     profile,
@@ -285,79 +435,140 @@ async function discoverWellKnown(origin: string): Promise<Discovered> {
 
 let rpcId = 1
 
-/**
- * The Dev Dashboard token is a *Catalog* credential. Observed live
- * (2026-09-29): sending it to a merchant's Checkout MCP endpoint
- * (aab-usa-v2.myshopify.com) returns JSON-RPC -32000 "AuthenticationFailed",
- * while the same calls without it work (ucp-cli never sends one to merchants).
- * So only the catalog endpoint gets it, unless SHOPIFY_TOKEN_FOR_MERCHANTS=1.
- */
-export function shouldSendToken(endpoint: string): boolean {
-  if (process.env.SHOPIFY_TOKEN_FOR_MERCHANTS === '1') return true
+// ─── per-call auth policy ───────────────────────────────────────────────────
+
+export type Surface = 'global-catalog' | 'merchant-catalog' | 'cart' | 'checkout'
+
+export function isCatalogEndpoint(endpoint: string): boolean {
   return new URL(endpoint).origin === new URL(config().catalogUrl).origin
 }
 
+export function surfaceOf(endpoint: string, tool: string): Surface {
+  if (isCatalogEndpoint(endpoint)) return 'global-catalog'
+  if (CHECKOUT_TOOLS.has(tool) || tool.includes('checkout')) return 'checkout'
+  if (tool.includes('cart')) return 'cart'
+  return 'merchant-catalog'
+}
+
+/** Shopify's rule: Bearer on Global Catalog and checkout tools, nothing else. */
+export function tokenRequired(surface: Surface, tool: string): boolean {
+  if (surface === 'global-catalog') return true
+  return surface === 'checkout' && CHECKOUT_TOOLS.has(tool)
+}
+
 /**
- * How a request identified itself (Shopify's tiers):
- *   token     — Authorization: Bearer <Dev Dashboard JWT>
- *   signed    — RFC 9421 HTTP Message Signature (NOT implemented; ucp-cli
- *               0.9.0 does not sign either)
- *   anonymous — agent profile URL in meta["ucp-agent"] only
- *   cli       — delegated to @shopify/ucp-cli (which is anonymous today)
+ * How a request identified itself:
+ *   token    — Authorization: Bearer <client_credentials JWT>
+ *   none     — no token, because the surface does not take one ("tasarım gereği")
+ *   fallback — no token although the surface needs one; only with the test
+ *              setting "token'sız dene" ("token yok – yedek")
+ *   cli      — delegated to @shopify/ucp-cli (test setting)
  */
-export type AuthMode = 'token' | 'signed' | 'anonymous' | 'cli'
+export type AuthMode = 'token' | 'none' | 'fallback' | 'cli'
+export const AUTH_LABEL: Record<AuthMode, string> = {
+  token: 'token',
+  none: 'token yok – tasarım gereği',
+  fallback: 'token yok – yedek',
+  cli: 'CLI (test)',
+}
 export interface AuthInfo {
   mode: AuthMode
-  /** Why this mode (e.g. "token alınamadı → anonim", "mağazaya token gönderilmez"). */
+  label: string
+  /** Why this mode (e.g. "token reddedildi → token'sız yedek"). */
   note?: string
+  /** Agent profile sent in meta["ucp-agent"].profile. */
+  profile?: string
+  /** Token facts at send time (never the token itself). */
+  tokenScopes?: string[]
+  tokenExpiresAt?: number
+}
+
+function authInfo(mode: AuthMode, extra: Partial<AuthInfo> = {}): AuthInfo {
+  return { mode, label: AUTH_LABEL[mode], ...extra }
 }
 
 export interface TokenState {
   configured: boolean
   status: 'not-configured' | 'not-requested' | 'ok' | 'failed'
+  credentialSource?: string
+  warning?: string
   expiresAt?: number
+  obtainedAt?: number
+  scopes?: string[]
+  limits?: unknown
   error?: { at: number; message: string; httpStatus?: number }
+  /** Last time a business rejected the token (AuthenticationFailed). */
+  rejected?: { at: number; host: string; tool: string; message: string }
 }
-const tokenState: { error?: TokenState['error'] } = ((globalThis as unknown as { __ucpTokenState?: { error?: TokenState['error'] } }).__ucpTokenState ??= {})
+const tokenState: { error?: TokenState['error']; rejected?: TokenState['rejected'] } = ((
+  globalThis as unknown as { __ucpTokenState?: { error?: TokenState['error']; rejected?: TokenState['rejected'] } }
+).__ucpTokenState ??= {})
 
 export function getTokenState(): TokenState {
-  const configured = config().hasClientCredentials
-  if (!configured) return { configured, status: 'not-configured' }
-  if (g.__ucpToken && g.__ucpToken.expiresAt > Date.now()) return { configured, status: 'ok', expiresAt: g.__ucpToken.expiresAt }
-  if (tokenState.error) return { configured, status: 'failed', error: tokenState.error }
-  return { configured, status: 'not-requested' }
+  const creds = credentials()
+  const configured = Boolean(creds.id && creds.secret)
+  const base = { configured, credentialSource: creds.source, warning: creds.warning, rejected: tokenState.rejected }
+  if (!configured) return { ...base, status: 'not-configured' }
+  const t = g.__ucpToken
+  if (tokenState.error) return { ...base, status: 'failed', error: tokenState.error }
+  if (t && t.expiresAt > Date.now())
+    return { ...base, status: 'ok', expiresAt: t.expiresAt, obtainedAt: t.obtainedAt, scopes: t.claims.scopes, limits: t.claims.limits }
+  return { ...base, status: 'not-requested' }
 }
 
-async function authFor(endpoint: string): Promise<{ headers: Record<string, string>; info: AuthInfo }> {
-  if (!shouldSendToken(endpoint)) {
-    return {
-      headers: {},
-      info: { mode: 'anonymous', note: config().hasClientCredentials ? 'mağazaya token gönderilmez (AuthenticationFailed)' : undefined },
+// ─── agent profiles ─────────────────────────────────────────────────────────
+
+const overrideCheck: { url?: string; ok?: boolean; reason?: string } = ((globalThis as unknown as {
+  __ucpProfileCheck?: { url?: string; ok?: boolean; reason?: string }
+}).__ucpProfileCheck ??= {})
+
+/** Does a profile JSON declare both the cart and the checkout capability? */
+export function declaresCartAndCheckout(profile: unknown): boolean {
+  const caps = ((profile as Json | undefined)?.ucp as Json | undefined)?.capabilities
+  const names = Array.isArray(caps)
+    ? caps.map((c) => String((c as Json)?.name ?? ''))
+    : caps && typeof caps === 'object'
+      ? Object.keys(caps)
+      : []
+  return names.includes('dev.ucp.shopping.cart') && names.includes('dev.ucp.shopping.checkout')
+}
+
+/**
+ * Profile for cart + checkout calls: UCP_AGENT_PROFILE_URL when it declares
+ * both capabilities, otherwise Shopify's cart-and-checkout example.
+ */
+async function merchantToolsProfile(): Promise<string> {
+  const url = config().profileOverride
+  if (!url) return CART_CHECKOUT_PROFILE
+  if (overrideCheck.url !== url) {
+    overrideCheck.url = url
+    try {
+      const r = await getJson(url)
+      overrideCheck.ok = r.status === 200 && declaresCartAndCheckout(r.body)
+      overrideCheck.reason = overrideCheck.ok ? undefined : r.status !== 200 ? `HTTP ${r.status}` : 'cart + checkout yeteneği ilan etmiyor'
+    } catch (e) {
+      overrideCheck.ok = false
+      overrideCheck.reason = (e as Error).message
     }
+    if (!overrideCheck.ok) console.warn(`[ucp] UCP_AGENT_PROFILE_URL kullanılmadı (${overrideCheck.reason}) → ${CART_CHECKOUT_PROFILE}`)
   }
-  if (!config().hasClientCredentials) return { headers: {}, info: { mode: 'anonymous', note: 'SHOPIFY_CLIENT_ID/SECRET yok' } }
-  // After a failure, don't hammer api.shopify.com on every request: retry
-  // the token at most once a minute, stay anonymous in between.
-  const TOKEN_RETRY_MS = 60_000
-  if (tokenState.error && Date.now() - tokenState.error.at < TOKEN_RETRY_MS && !g.__ucpToken) {
-    return { headers: {}, info: { mode: 'anonymous', note: `token alınamadı → anonim: ${tokenState.error.message}` } }
+  return overrideCheck.ok ? url : CART_CHECKOUT_PROFILE
+}
+
+export function profileStatus() {
+  return {
+    catalog: CATALOG_PROFILE,
+    cartCheckout: overrideCheck.ok && overrideCheck.url ? overrideCheck.url : CART_CHECKOUT_PROFILE,
+    override: config().profileOverride ? { url: config().profileOverride, used: Boolean(overrideCheck.ok), reason: overrideCheck.reason } : null,
   }
-  try {
-    const token = await getAccessToken()
-    tokenState.error = undefined
-    return token ? { headers: { Authorization: `Bearer ${token}` }, info: { mode: 'token' } } : { headers: {}, info: { mode: 'anonymous' } }
-  } catch (e) {
-    // Catalog still works anonymously (lowest tier) — degrade, but loudly.
-    const err = e as UcpError
-    tokenState.error = { at: Date.now(), message: err.message, httpStatus: err.httpStatus }
-    console.warn(`[ucp] token isteği başarısız → anonim devam: ${err.message}`)
-    return { headers: {}, info: { mode: 'anonymous', note: `token alınamadı → anonim: ${err.message}` } }
-  }
+}
+
+export async function profileFor(surface: Surface): Promise<string> {
+  return surface === 'cart' || surface === 'checkout' ? merchantToolsProfile() : CATALOG_PROFILE
 }
 
 // ─── per-surface status (for the top-bar indicator) ─────────────────────────
 
-export type Surface = 'global-catalog' | 'merchant-catalog' | 'cart' | 'checkout'
 export interface SurfaceStatus {
   surface: Surface
   auth: AuthInfo
@@ -367,16 +578,11 @@ export interface SurfaceStatus {
   tool: string
   ok: boolean
   error?: string
+  /** The business rejected our token (AuthenticationFailed). */
+  authRejected?: boolean
   retryAfterSeconds?: number
 }
 const surfaceStatus: Map<Surface, SurfaceStatus> = ((globalThis as unknown as { __ucpSurface?: Map<Surface, SurfaceStatus> }).__ucpSurface ??= new Map())
-
-export function surfaceOf(endpoint: string, tool: string): Surface {
-  if (new URL(endpoint).origin === new URL(config().catalogUrl).origin) return 'global-catalog'
-  if (tool.includes('checkout')) return 'checkout'
-  if (tool.includes('cart')) return 'cart'
-  return 'merchant-catalog'
-}
 
 export function getSurfaceStatus(): SurfaceStatus[] {
   return [...surfaceStatus.values()]
@@ -394,10 +600,15 @@ export function recordSurface(endpoint: string, tool: string, auth: AuthInfo, ok
     tool,
     ok,
     error: err ? `${err.kind}: ${err.message}`.slice(0, 240) : undefined,
+    authRejected: err ? isAuthRejection(err) : undefined,
     retryAfterSeconds: err?.retryAfterSeconds,
   })
-  // Server log line — one per UCP request (no payloads, no PII).
-  const line = `[ucp] ${tool} → ${host} surface=${surface} auth=${auth.mode}${auth.note ? ` (${auth.note})` : ''} ${ok ? 'ok' : `ERR ${err?.kind}${err?.rpcCode !== undefined ? ` ${err.rpcCode}` : ''}${err?.httpStatus ? ` http=${err.httpStatus}` : ''}`}${ms !== undefined ? ` ${ms}ms` : ''}`
+  // Server log line — one per UCP request (no payloads, no PII, no token).
+  const tok =
+    auth.mode === 'token'
+      ? ` scopes=[${(auth.tokenScopes ?? []).join(' ')}]${auth.tokenExpiresAt ? ` exp=${new Date(auth.tokenExpiresAt).toISOString()}` : ''}`
+      : ''
+  const line = `[ucp] ${tool} → ${host} surface=${surface} auth="${auth.label}"${auth.note ? ` (${auth.note})` : ''}${tok} profile=${auth.profile ?? '—'} ${ok ? 'ok' : `ERR ${err?.kind}${err?.rpcCode !== undefined ? ` ${err.rpcCode}` : ''}${err?.httpStatus ? ` http=${err.httpStatus}` : ''}`}${ms !== undefined ? ` ${ms}ms` : ''}`
   if (ok) console.info(line)
   else console.warn(line)
 }
@@ -405,6 +616,17 @@ export function recordSurface(endpoint: string, tool: string, auth: AuthInfo, ok
 /** Filled in by rpc() so callers can attribute the request. */
 export interface RpcInfo {
   auth?: AuthInfo
+  /** Profile to report (rpc does not read params). */
+  profile?: string
+}
+
+/** A business saying "your token is not accepted here". */
+export function isAuthRejection(e: unknown): boolean {
+  if (!(e instanceof UcpError)) return false
+  if (e.kind === 'auth' && (e.details as { rejected?: boolean } | undefined)?.rejected) return true
+  if (e.httpStatus === 401 || e.httpStatus === 403) return true
+  const text = `${e.message} ${JSON.stringify(e.data ?? '')}`
+  return /AuthenticationFailed|Unauthori[sz]ed|invalid[_ ]token|token (?:is )?(?:invalid|expired)/i.test(text)
 }
 
 // Endpoint → epoch ms until which the business asked us to back off (429).
@@ -427,8 +649,9 @@ export function rateLimitRemaining(endpoint: string): number | undefined {
 /**
  * One JSON-RPC call. Protocol failures throw UcpError; a successful `result`
  * is returned untouched (business messages inside it are NOT errors).
- * HTTP 429 → wait `Retry-After` once when it is short, otherwise remember the
- * block (circuit breaker above) and surface it.
+ * The Authorization header is decided here, from the surface (see
+ * tokenRequired). HTTP 429 → wait `Retry-After` once when it is short,
+ * otherwise remember the block (circuit breaker above) and surface it.
  */
 export async function rpc<T = unknown>(
   endpoint: string,
@@ -446,9 +669,60 @@ export async function rpc<T = unknown>(
       message: `Hız limiti sürüyor (${Math.ceil(left / 60)} dk kaldı). Süre bitene kadar bu uç noktaya istek gönderilmiyor.`,
     })
   }
+  const tool = method === 'tools/call' ? String((params as Json | undefined)?.name ?? method) : method
+  const surface = surfaceOf(endpoint, tool)
+  const profile = info.profile
+  const host = new URL(endpoint).host
+
+  let headers: Record<string, string> = {}
+  if (!tokenRequired(surface, tool)) {
+    info.auth = authInfo('none', { profile })
+  } else {
+    try {
+      const token = await getAccessToken()
+      if (!token) throw new UcpError({ kind: 'auth', message: 'SHOPIFY_CLIENT_ID / SHOPIFY_CLIENT_SECRET tanımlı değil' })
+      const t = g.__ucpToken
+      headers = { Authorization: `Bearer ${token}` }
+      info.auth = authInfo('token', { profile, tokenScopes: t?.claims.scopes, tokenExpiresAt: t?.expiresAt })
+    } catch (e) {
+      const err = e as UcpError
+      if (!settings.tokenlessFallback) {
+        info.auth = authInfo('token', { profile, note: 'token alınamadı — istek gönderilmedi' })
+        throw new UcpError({
+          kind: 'auth',
+          httpStatus: err.httpStatus,
+          message: `Token alınamadı: ${err.message}. ${tool} → ${host} gönderilmedi (token'sız deneme kapalı).`,
+        })
+      }
+      info.auth = authInfo('fallback', { profile, note: `token alınamadı: ${err.message}` })
+    }
+  }
+
+  try {
+    return await send<T>(endpoint, method, params, headers, attempt)
+  } catch (e) {
+    if (info.auth?.mode !== 'token' || !isAuthRejection(e)) throw e
+    const err = e as UcpError
+    tokenState.rejected = { at: Date.now(), host, tool, message: err.message.slice(0, 240) }
+    console.warn(`[ucp] AuthenticationFailed: ${host} token'ı reddetti (${tool}): ${err.message.slice(0, 160)}`)
+    if (settings.tokenlessFallback) {
+      // Test-only: same call once more without the token, clearly labelled.
+      info.auth = authInfo('fallback', { profile, note: `token reddedildi (${err.rpcCode ?? err.httpStatus ?? 'auth'}) → token'sız yedek` })
+      return send<T>(endpoint, method, params, {}, attempt)
+    }
+    throw new UcpError({
+      kind: 'auth',
+      rpcCode: err.rpcCode,
+      httpStatus: err.httpStatus,
+      data: err.data,
+      details: { rejected: true },
+      message: `AuthenticationFailed — ${host} token'ı reddetti (${tool}). Token'sız deneme kapalı. Mağaza yanıtı: ${err.message}`,
+    })
+  }
+}
+
+async function send<T>(endpoint: string, method: string, params: unknown, auth: Record<string, string>, attempt: number): Promise<T> {
   const id = rpcId++
-  const auth = await authFor(endpoint)
-  info.auth = auth.info
   let res: Response
   try {
     res = await fetch(endpoint, {
@@ -456,8 +730,9 @@ export async function rpc<T = unknown>(
       headers: {
         'Content-Type': 'application/json',
         Accept: 'application/json',
+        'MCP-Protocol-Version': MCP_PROTOCOL_VERSION,
         'User-Agent': USER_AGENT,
-        ...auth.headers,
+        ...auth,
       },
       body: JSON.stringify({ jsonrpc: '2.0', id, method, params }),
       signal: AbortSignal.timeout(TIMEOUT_MS),
@@ -472,7 +747,7 @@ export async function rpc<T = unknown>(
     const max = config().maxRetryAfter
     if (attempt === 0 && wait !== undefined && wait <= max) {
       await new Promise((r) => setTimeout(r, wait * 1000))
-      return rpc<T>(endpoint, method, params, attempt + 1, info)
+      return send<T>(endpoint, method, params, auth, attempt + 1)
     }
     if (wait !== undefined) blockedUntil.set(endpoint, Date.now() + wait * 1000)
     throw new UcpError({
@@ -529,7 +804,7 @@ export async function listTools(disc: Discovered, force = false): Promise<Record
   const key = `${disc.endpoint}|${disc.agentProfileUrl}`
   const hit = toolsCache.get(key)
   if (!force && hit && Date.now() - hit.at < TOOLS_TTL_MS) return hit.value
-  const info: RpcInfo = {}
+  const info: RpcInfo = { profile: disc.agentProfileUrl }
   let result: { tools?: ToolDescriptor[] }
   try {
     result = await rpc<{ tools?: ToolDescriptor[] }>(
@@ -540,7 +815,7 @@ export async function listTools(disc: Discovered, force = false): Promise<Record
       info,
     )
   } catch (e) {
-    if (e instanceof UcpError) recordSurface(disc.endpoint, 'tools/list', info.auth ?? { mode: 'anonymous' }, false, e)
+    if (e instanceof UcpError) recordSurface(disc.endpoint, 'tools/list', info.auth ?? authInfo('none'), false, e)
     throw e
   }
   const tools: Record<string, ToolDescriptor> = {}
@@ -562,9 +837,15 @@ export interface CallTrace {
   response?: unknown
   error?: unknown
   validation?: ValidationReport
-  /** Which identity tier this request used. */
+  /** Which identity path this request used (+ profile, token scopes/expiry). */
   auth?: AuthInfo
   surface?: Surface
+  /** Agent profile sent in meta["ucp-agent"].profile. */
+  profile?: string
+  /** Where the payload came from: structuredContent or content[0].text. */
+  payloadSource?: PayloadSource
+  /** PII-masked raw MCP result (both renderings, as received). */
+  raw?: unknown
 }
 
 export interface CallResult<T = Json> {
@@ -583,21 +864,46 @@ export interface CallOptions {
   allowUnknownFields?: boolean
 }
 
-/** Unwrap MCP `tools/call` → UCP payload (structuredContent preferred). */
-export function unwrapToolResult(result: unknown): { payload: unknown; isError: boolean } {
-  if (typeof result !== 'object' || result === null) return { payload: result, isError: false }
+export type PayloadSource = 'structuredContent' | 'content[0].text' | 'content[0].text (JSON değil)' | 'result'
+
+/** Unwrap MCP `tools/call` → UCP payload (structuredContent preferred, else content[0].text JSON). */
+export function unwrapToolResult(result: unknown): { payload: unknown; isError: boolean; source: PayloadSource } {
+  if (typeof result !== 'object' || result === null) return { payload: result, isError: false, source: 'result' }
   const r = result as Json
   const isError = r.isError === true
-  if (r.structuredContent && typeof r.structuredContent === 'object') return { payload: r.structuredContent, isError }
+  if (r.structuredContent && typeof r.structuredContent === 'object') return { payload: r.structuredContent, isError, source: 'structuredContent' }
   const first = Array.isArray(r.content) ? (r.content[0] as Json | undefined) : undefined
   if (first && typeof first.text === 'string') {
     try {
-      return { payload: JSON.parse(first.text), isError }
+      return { payload: JSON.parse(first.text), isError, source: 'content[0].text' }
     } catch {
-      return { payload: { text: first.text }, isError }
+      return { payload: { text: first.text }, isError, source: 'content[0].text (JSON değil)' }
     }
   }
-  return { payload: result, isError }
+  return { payload: result, isError, source: 'result' }
+}
+
+/**
+ * Raw MCP result for the debug panel with PII masked. Text renderings are
+ * parsed and masked as JSON — masking the raw string would miss nested keys.
+ */
+export function maskRawResult(result: unknown): unknown {
+  if (typeof result !== 'object' || result === null) return result
+  const r = result as Json
+  const out: Json = { ...r }
+  if (r.structuredContent) out.structuredContent = maskPII(r.structuredContent)
+  if (Array.isArray(r.content)) {
+    out.content = r.content.map((c) => {
+      const item = c as Json
+      if (typeof item?.text !== 'string') return item
+      try {
+        return { ...item, text: JSON.stringify(maskPII(JSON.parse(item.text))) }
+      } catch {
+        return { ...item, text: `[JSON olmayan metin, ${item.text.length} karakter — gizlilik için gösterilmiyor]` }
+      }
+    })
+  }
+  return out
 }
 
 export async function callTool<T = Json>(
@@ -615,6 +921,8 @@ export async function callTool<T = Json>(
   }
 
   const disc = await discover(businessUrl)
+  const surface = surfaceOf(disc.endpoint, toolName)
+  const profile = await profileFor(surface)
   const tools = await listTools(disc)
   const tool = tools[toolName]
   if (!tool) {
@@ -629,7 +937,7 @@ export async function callTool<T = Json>(
   // (us.aabcollection.com search_catalog): `meta` is a closed object listing
   // only `ucp-agent`, so an unconditional key (what ucp-cli does) is rejected
   // by our pre-flight. Mutating tools on Shopify list it; read tools may not.
-  const meta: Json = { ...((args.meta as Json) ?? {}), 'ucp-agent': { profile: disc.agentProfileUrl } }
+  const meta: Json = { ...((args.meta as Json) ?? {}), 'ucp-agent': { profile } }
   const schema = tool.inputSchema as Json
   const metaDescribed = pathStatus(schema, 'meta') === 'present'
   if (!metaDescribed || pathStatus(schema, 'meta.idempotency-key') !== 'absent') meta['idempotency-key'] = randomUUID()
@@ -644,6 +952,8 @@ export async function callTool<T = Json>(
     durationMs: 0,
     request: maskPII(wireArgs),
     validation,
+    surface,
+    profile,
   }
   const blocking = validation.valid === false || (validation.unknownFields.length > 0 && !opts.allowUnknownFields)
   if (blocking) {
@@ -658,14 +968,15 @@ export async function callTool<T = Json>(
   }
 
   const started = Date.now()
-  const info: RpcInfo = {}
-  trace.surface = surfaceOf(disc.endpoint, toolName)
+  const info: RpcInfo = { profile }
   try {
     const raw = await rpc(disc.endpoint, 'tools/call', { name: toolName, arguments: wireArgs }, 0, info)
     trace.auth = info.auth
-    const { payload, isError } = unwrapToolResult(raw)
+    const { payload, isError, source } = unwrapToolResult(raw)
     trace.durationMs = Date.now() - started
     trace.response = maskPII(payload)
+    trace.payloadSource = source
+    trace.raw = maskRawResult(raw)
     const data = payload as Json
     // MCP `isError: true` is a tool-level failure. If it still carries a UCP
     // object (id / messages) keep it — business messages are handled by the
@@ -675,11 +986,11 @@ export async function callTool<T = Json>(
       const text = typeof data?.text === 'string' ? data.text : JSON.stringify(data).slice(0, 300)
       throw new UcpError({ kind: 'jsonrpc', message: `MCP araç hatası (isError): ${text}`, data })
     }
-    recordSurface(disc.endpoint, toolName, info.auth ?? { mode: 'anonymous' }, true, undefined, trace.durationMs)
+    recordSurface(disc.endpoint, toolName, info.auth ?? authInfo('none', { profile }), true, undefined, trace.durationMs)
     return { data: data as T, ucp: data?.ucp as UcpMeta | undefined, isError, trace, discovered: disc }
   } catch (e) {
     trace.durationMs = Date.now() - started
-    trace.auth = info.auth ?? { mode: 'anonymous' }
+    trace.auth = info.auth ?? authInfo('none', { profile })
     trace.error = e instanceof UcpError ? e.toJSON() : { message: (e as Error).message }
     if (e instanceof UcpError) recordSurface(disc.endpoint, toolName, trace.auth, false, e, trace.durationMs)
     if (e instanceof UcpError) e.details = { ...(e.details as Json), trace }

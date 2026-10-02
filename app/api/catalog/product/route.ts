@@ -26,7 +26,7 @@ export async function POST(req: Request) {
   const notes: string[] = []
   const log = () => {
     for (const t of traces)
-      pushLog(s, { tool: t.tool, auth: t.auth, surface: t.surface, endpoint: t.endpoint, durationMs: t.durationMs, request: t.request, response: '[Catalog yanıtı sunucuda saklanmaz]' })
+      pushLog(s, { tool: t.tool, auth: t.auth, surface: t.surface, profile: t.profile, payloadSource: t.payloadSource, endpoint: t.endpoint, durationMs: t.durationMs, request: t.request, response: '[Catalog yanıtı sunucuda saklanmaz]' })
   }
   try {
     let product: UiProduct | null = null

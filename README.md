@@ -49,12 +49,14 @@ npm run typecheck
 
 | Değişken | Zorunlu | Açıklama |
 | --- | --- | --- |
-| `SHOPIFY_CLIENT_ID` / `SHOPIFY_CLIENT_SECRET` | Hayır | Dev Dashboard → Catalog istemci bilgileri. İkisi de varsa sunucu `https://api.shopify.com/auth/access_token` (`grant_type=client_credentials`) ile token alır, bellekte ~60 dk önbelleğe alır ve her UCP isteğine `Authorization: Bearer` ekler. |
-| `UCP_AGENT_PROFILE_URL` | Hayır | Her istekte `meta["ucp-agent"].profile` olarak giden agent profili. Boşsa mağazanın desteklediği sürüme göre Shopify'ın örnek profili: `https://shopify.dev/ucp/agent-profiles/<sürüm>/valid-with-capabilities.json`. |
-| `UCP_TRANSPORT` | Hayır | `auto` (varsayılan: doğrudan JSON-RPC) veya `cli` (`@shopify/ucp-cli`'ı `child_process` ile çağırır). |
-| `UCP_CLI_BIN` | Hayır | `cli` modunda `ucp` ikilisinin yolu. |
-| `SHOPIFY_CATALOG_URL` | Hayır | Dev Dashboard'daki Catalog MCP uç noktası (ör. `https://catalog.shopify.com/api/ucp/mcp`). Olduğu gibi kullanılır; origin'in `/.well-known/ucp`'si yalnızca UCP sürümü için okunur. |
-| `SHOPIFY_CATALOG_ID` | Hayır | Dev Dashboard katalog kimliği. Global aramada `saved_catalog_slug` olarak gönderilir (şemada listelenmiyor; yanlışsa `not_found` mesajı döner). |
+| `SHOPIFY_CLIENT_ID` / `SHOPIFY_CLIENT_SECRET` | Evet (Global Catalog ve checkout için) | Dev Dashboard istemci bilgileri. Sunucu `https://api.shopify.com/auth/access_token` (`grant_type=client_credentials`) ile JWT alır, bellekte tutar, bitişten 1 dk önce yeniler. Eski adlar (`SHOPIFY_API_KEY/SECRET`, `UCP_CLIENT_ID/SECRET`, `CLIENT_ID/SECRET`) uyarıyla okunur. |
+| `UCP_AGENT_PROFILE_URL` | Hayır | Sepet + checkout çağrıları için Kauna'nın kendi profili. Yalnızca `dev.ucp.shopping.cart` **ve** `dev.ucp.shopping.checkout` ilan ediyorsa kullanılır; yoksa Shopify'ın `examples/2026-08-25/cart-and-checkout.json` profili. Katalog her zaman `examples/2026-08-25/valid-with-capabilities.json`. |
+| `UCP_TOKENLESS_FALLBACK` | Hayır | `1` → Ayarlar'daki "Token reddedilirse token'sız dene (yalnızca test)" açık başlar. Varsayılan kapalı. |
+| `UCP_TRANSPORT` | Hayır | `cli` → Ayarlar'daki "CLI adaptörü (yalnızca test)" açık başlar. Varsayılan doğrudan JSON-RPC. |
+| `UCP_CLI_BIN` | Hayır | CLI adaptöründe `ucp` ikilisinin yolu. |
+| `SHOPIFY_CATALOG_URL` | Hayır | Dev Dashboard'daki Catalog MCP uç noktası (ör. `https://catalog.shopify.com/api/ucp/mcp`). Olduğu gibi kullanılır. |
+| `SHOPIFY_CATALOG_ID` | Hayır | Dev Dashboard katalog kimliği. Global Catalog aramasında `catalog.catalog_id` olarak gönderilir (lookup / get_product'ta şema listeliyorsa). |
+| `SHOPIFY_AUTH_URL` | Hayır | Yalnızca çevrimdışı sahte sunucu için token uç noktası (varsayılan `https://api.shopify.com/auth/access_token`). |
 | `UCP_CATALOG_URL` | Hayır | Global Catalog işletme URL'si (varsayılan `https://catalog.shopify.com`, `/.well-known/ucp` ile keşfedilir). |
 | `DEFAULT_SELLER` | Hayır | Arayüzdeki varsayılan satıcı (varsayılan `https://us.aabcollection.com`). |
 | `UCP_MAX_RETRY_AFTER_SECONDS` | Hayır | 429'da `Retry-After` bu süreden kısaysa bir kez bekleyip tekrar dener; uzunsa hatayı arayüze taşır (varsayılan 5). |
@@ -63,15 +65,33 @@ Hiçbir değişken `NEXT_PUBLIC_` değildir; sırlar tarayıcıya gitmez. `.env*
 
 ---
 
-## Kimlik doğrulama: seçilen yol ve nedeni
+## Kimlik doğrulama (Shopify "Authenticate your agent" deseni)
 
-Sıralama görevdeki gibi uygulandı (`lib/ucp/client.ts`):
+`lib/ucp/client.ts` tek kural tablosuna uyar:
 
-1. **`SHOPIFY_CLIENT_ID` + `SHOPIFY_CLIENT_SECRET` varsa** → bearer token + doğrudan JSON-RPC 2.0.
-2. **Yoksa → CLI'ın yöntemi, doğrudan TypeScript ile (varsayılan yol).** `@shopify/ucp-cli@0.9.0` kaynak kodu okundu (`src/core/mcp-client.ts`, `operation.ts`, `discover.ts`): CLI **istekleri imzalamıyor**. Kimliği tamamen `params.arguments.meta["ucp-agent"].profile` içindeki profil URL'sinden ibaret; mağaza bu URL'yi kendisi çekip yetenekleri müzakere ediyor. Hesapsız çalışmasının nedeni bu. Bu yüzden "taklit" edilecek bir imza yok; CLI'ın gönderdiği istekler bayt düzeyinde aynı şekilde üretiliyor: `/.well-known/ucp` → sürüm seçimi → `tools/list` (canlı şema) → `tools/call` + `meta.idempotency-key`.
-3. **`UCP_TRANSPORT=cli`** → yedek adaptör (`lib/ucp/cli-adapter.ts`). `complete` için eşleme yoktur.
+| Yüzey | Araçlar | `Authorization` | Profil (`meta["ucp-agent"].profile`) |
+| --- | --- | --- | --- |
+| Global Catalog | `search_catalog`, `lookup_catalog`, `get_product`, `tools/list` | `Bearer <token>` | `…/examples/2026-08-25/valid-with-capabilities.json` |
+| Mağaza kataloğu | aynı araçlar, mağaza uç noktasında | yok — *tasarım gereği* | `…/valid-with-capabilities.json` |
+| Sepet | `create_cart`, `get_cart`, `update_cart`, `cancel_cart` | yok — *tasarım gereği* | `…/examples/2026-08-25/cart-and-checkout.json` |
+| Checkout | `create_checkout`, `get_checkout`, `update_checkout`, `cancel_checkout` | `Bearer <token>` | `…/cart-and-checkout.json` |
 
-Neden 2 varsayılan: ek bağımlılık ve süreç başlatma maliyeti yok, istek/yanıtın tamamı hata ayıklama panelinde görünür, `tools/list` şeması doğrudan elimizde (kural 4 için gerekli). CLI yolu yalnızca doğrudan istekler bir gün farklı davranırsa karşılaştırma için duruyor.
+- Her JSON-RPC isteğinde `MCP-Protocol-Version: 2026-03-26`.
+- Mağaza uç noktası `/.well-known/ucp` → `dev.ucp.shopping` MCP girişi; okunamazsa `{mağaza}/api/ucp/mcp`.
+- **Token** tek fonksiyondan (`getAccessToken`) gelir. JWT içindeki `scopes`, `exp`, `limits` okunur (token'ın kendisi hiçbir yerde gösterilmez; günlükte yalnızca ilk 6 karakter).
+- **Sessiz yedek yok.** Token alınamazsa token gerektiren istek **gönderilmez**. Üst çubukta kalıcı kırmızı band: "Token alınamadı: <neden>". Mağaza token'ı reddederse (`AuthenticationFailed`, HTTP 401/403) hata olduğu gibi gösterilir ve token'sız tekrar denenmez.
+- **Test ayarları** (Ayarlar → "Kimlik (yalnızca test)", varsayılan kapalı): "Token reddedilirse token'sız dene" ve "CLI adaptörünü kullan". Açıkken yapılan çağrılar panelde, sunucu günlüğünde ve mobil test günlüğünde `token yok – yedek` (⚠) veya `CLI (test)` olarak işaretlenir.
+- **Akış**: `create_cart` (token yok) → `create_checkout` + üst düzey `cart_id` (token; sepet içeriği önceliklidir) → her güncellemeden önce `get_checkout` → tam `update_checkout` (PUT: `currency`, `context`, `line_items` `{quantity, item:{id}}`, `buyer.email` …) → `continue_url`. Şema `cart_id`'yi `checkout` içinde listeliyorsa oraya, hiç listelemiyorsa satırlarla oluşturulur (not düşülür).
+- Yanıt `structuredContent`'ten, yoksa `content[0].text` JSON'undan okunur; kaynak her kayıtta görünür.
+
+### Doğrulama betiği
+
+```bash
+node --env-file=.env scripts/verify-auth-flow.mjs            # varsayılan: us.aabcollection.com, varyant 47830495854906
+node --env-file=.env scripts/verify-auth-flow.mjs --seller https://us.aabcollection.com --email test@example.com
+```
+
+Sırasıyla: token (scopes) → Global Catalog araması "Green Tartan Maxi" → mağaza uç noktası → `create_cart` (token yok) → `create_checkout` (token, üst düzey `cart_id`) → `get_checkout` + `update_checkout` (`buyer.email`, PUT) → `cancel_checkout`. Her adımın kimlik yolu ve sonucu yazdırılır, `verify-auth-report.md` dosyasına tablo olarak kaydedilir (git'e eklenmez). `AuthenticationFailed` açıkça raporlanır; token'sız tekrar yoktur. `complete_checkout` betikte de yasaktır.
 
 ---
 
@@ -88,7 +108,7 @@ app/                    Next.js App Router
   debug/                Ham istek/yanıtlar (maskeli), checkout durumu, Bulguları kopyala
   api/…                 Tarayıcının konuştuğu TEK yer. UCP istekleri yalnızca burada yapılır.
 lib/ucp/
-  client.ts             Keşif, token, JSON-RPC, 429/Retry-After, şema ön kontrolü, complete yasağı
+  client.ts             Keşif, token + yüzey başına kimlik kuralı, profiller, JSON-RPC, 429/Retry-After, şema ön kontrolü, complete yasağı
   schema.ts             Canlı inputSchema üzerinde $ref/allOf çözümleme, bilinmeyen alan tespiti, Ajv
   catalog.ts            search / lookup / get_product + products.json yedeği (önbellek yok)
   cart.ts               Cart MCP (ekleme/çıkarma yinelemeleri burada)
@@ -97,7 +117,8 @@ lib/ucp/
   cli-adapter.ts        Yedek taşıma
 lib/session.ts          Bellek içi oturum (kalıcı veritabanı yok)
 lib/mask.ts             Kişisel veri maskeleme
-scripts/mock-ucp-server.mjs   Çevrimdışı geliştirme için sahte UCP mağazası
+scripts/mock-ucp-server.mjs   Çevrimdışı geliştirme için sahte UCP mağazası (token kurallarını uygular)
+scripts/verify-auth-flow.mjs  Kimlik doğrulama akışının 8 adımlı doğrulaması (Mac'te çalıştırılır)
 tests/                  Birim testleri
 ```
 
@@ -114,7 +135,7 @@ tests/                  Birim testleri
 
 ### Kimlik yolu göstergesi
 
-Üst çubukta her yüzey için o anki kimlik yolu ve son durum görünür: `Global Catalog: token · Mağaza katalog: anonim · Sepet: anonim · Checkout: anonim`. Yeşil nokta son isteğin başarılı olduğunu, kırmızı hatalı olduğunu, ⏳ hız limitini (kalan dakika) gösterir. Tıklayınca ayrıntılar açılır: token durumu ve başarısızlık nedeni, imzalı katman durumu, yüzey başına son istek. Aynı bilgi hata ayıklama panelinde her kayıtta rozet olarak, sunucu terminalinde `[ucp] …` satırları olarak da yer alır. Token alınamazsa Global Catalog anonim devam eder (dakikada bir yeniden denenir). Limitler için bkz. FINDINGS.md §10.
+Üst çubuk: `Global Catalog: token ✓ · Mağaza katalog: token yok (tasarım gereği) · Sepet: token yok (tasarım gereği) · Checkout: token ✓`. ✗/kırmızı son isteğin başarısız olduğunu ya da token yokken isteğin gönderilmeyeceğini, ⏳ hız limitini gösterir. Token alınamadığında ya da mağaza reddettiğinde üstte kalıcı band çıkar. Tıklayınca ayrıntılar: token kapsamları ve kalan süre, kural, profiller, yüzey başına son istek. Hata ayıklama panelinde "Kimlik doğrulama" kartı (scopes / exp / limits / son ret / test ayarları) ve her istek için: araç, uç nokta, kimlik yolu etiketi, profil, token kapsamları + bitiş, yanıt kaynağı ve maskeli ham MCP yanıtı. Sunucu terminalinde her istek bir `[ucp] …` satırıdır. Limitler: FINDINGS.md §10.
 
 ### Kauna kimliği (canlıya hazırlık)
 
@@ -131,9 +152,9 @@ tests/                  Birim testleri
 
 ### `update_checkout` = PUT
 
-`buildCheckoutBody()` her güncellemede şunları **yeniden** gönderir: istek biçimli `line_items` (satır `id` + `item.id` + `quantity`), `buyer`, teslimat adresi (`fulfillment.methods[].destinations[]`, `line_item_ids`, seçili `groups[].selected_option_id`), `discounts.codes`, `attribution`, `context`. Yanıt alanları (başlık, fiyat, görsel) geri gönderilmez.
+Her güncellemeden önce `get_checkout` çağrılır; `buildCheckoutBody()` o yanıttan şunları **yeniden** gönderir: `currency`, istek biçimli `line_items` (`{quantity, item:{id}}`; satır `id` yalnızca şema listeliyorsa), `buyer`, teslimat adresi (`fulfillment.methods[].destinations[]`, `line_item_ids`, seçili `groups[].selected_option_id`), `discounts.codes`, `attribution`, `context`. Yanıt alanları (başlık, fiyat, görsel) geri gönderilmez.
 
-Checkout iki adımda kurulur: `create_checkout` (sepetten `cart_id` + `line_items: []`, alıcı, indirim, atıf), ardından teslimat adresini içeren tam `update_checkout`. Bunun nedeni `line_item_ids` değerlerinin create'ten önce bilinmemesi.
+Checkout şöyle kurulur: `create_checkout` (üst düzey `cart_id` + sepet satırları, alıcı, indirim, atıf), `get_checkout`, ardından teslimat adresini içeren tam `update_checkout`. Bunun nedeni `line_item_ids` değerlerinin create'ten önce bilinmemesi.
 
 ### Sessiz hata kontrolleri
 
@@ -198,12 +219,15 @@ Bilinen: her iki mağaza da `dev.shopify.card` ve `dev.shopify.shop_pay` ödeme 
 
 ## Çevrimdışı geliştirme: sahte UCP mağazası
 
-Gerçek mağazalara erişim yokken arayüzü denemek için `scripts/mock-ucp-server.mjs` kullanılabilir. Telefon zorunluluğunu, escalation'ı, bilinmeyen alanda adresin sessizce yok sayılmasını, `KAUNA10` indirimini ve iframe'i engelleyen `X-Frame-Options: DENY` başlığını taklit eder.
+Gerçek mağazalara erişim yokken arayüzü denemek için `scripts/mock-ucp-server.mjs` kullanılabilir. Kimlik kuralını katı uygular: checkout araçları token **ister**, sepet araçları token'ı **reddeder**, Global Catalog örneği token ister, `MCP-Protocol-Version` zorunludur; `MOCK_REJECT_TOKEN=1` ile checkout `AuthenticationFailed` döner. Telefon zorunluluğunu, escalation'ı, bilinmeyen alanda adresin sessizce yok sayılmasını, `KAUNA10` indirimini ve iframe'i engelleyen `X-Frame-Options: DENY` başlığını taklit eder.
 
 ```bash
 openssl req -x509 -newkey rsa:2048 -nodes -keyout /tmp/key.pem -out /tmp/cert.pem -days 7 \
   -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost"
-MOCK_TLS_CERT=/tmp/cert.pem MOCK_TLS_KEY=/tmp/key.pem node scripts/mock-ucp-server.mjs
-NODE_EXTRA_CA_CERTS=/tmp/cert.pem npm run dev
+MOCK_TLS_CERT=/tmp/cert.pem MOCK_TLS_KEY=/tmp/key.pem node scripts/mock-ucp-server.mjs                     # mağaza :8443
+MOCK_PORT=8444 MOCK_SELLER_PORT=8443 MOCK_TLS_CERT=/tmp/cert.pem MOCK_TLS_KEY=/tmp/key.pem \
+  node scripts/mock-ucp-server.mjs                                                                       # Global Catalog :8444
+NODE_EXTRA_CA_CERTS=/tmp/cert.pem SHOPIFY_CLIENT_ID=mock SHOPIFY_CLIENT_SECRET=mock \
+  SHOPIFY_AUTH_URL=https://localhost:8443/auth/access_token SHOPIFY_CATALOG_URL=https://localhost:8444/api/ucp/mcp npm run dev
 # Ana sayfa → "Hazır test ürünleri" → satıcı: localhost:8443, herhangi bir varyant kimliği → Checkout’a git
 ```

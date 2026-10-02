@@ -16,3 +16,4 @@ next-env.d.ts
 # UCP signing keys (private) — never commit
 keys/
 *.pem
+verify-auth-report.md

@@ -1,5 +1,5 @@
 // Fallback transport (path 3): run @shopify/ucp-cli with `--format json`.
-// Enabled with UCP_TRANSPORT=cli. The CLI does its own discovery,
+// Test setting only (Ayarlar → "CLI adaptörü", or UCP_TRANSPORT=cli). The CLI does its own discovery,
 // negotiation and client-side schema validation; we only translate
 // tool name + wire args ↔ CLI command + body.
 //
@@ -79,7 +79,7 @@ export async function callToolViaCli<T>(business: string, toolName: string, wire
   if (Object.keys(body).length > 0) args.push('--input', JSON.stringify(body))
 
   const started = Date.now()
-  const auth = { mode: 'cli' as const, note: 'ucp-cli (agent profili, imzasız)' }
+  const auth = { mode: 'cli' as const, label: 'CLI (test)', note: 'ucp-cli (test ayarı; agent profili, imzasız)' }
   let env: Json
   try {
     env = await ucp(args)

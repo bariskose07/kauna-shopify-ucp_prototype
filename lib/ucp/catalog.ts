@@ -7,7 +7,7 @@
 import { callTool, config, getInputSchema, type CallTrace } from './client'
 import { conformToSchema } from './conform'
 import { UcpError, isUcpError } from './errors'
-import type { UnknownField } from './schema'
+import { pathStatus, type UnknownField } from './schema'
 import type { Json } from './types'
 
 export interface UiMoney {
@@ -267,13 +267,15 @@ export interface CatalogResult<T> {
 async function catalogCall(business: string, tool: string, catalogBody: Json) {
   const schema = await getInputSchema(business, tool)
   const { args, dropped } = conformToSchema(schema, { catalog: catalogBody })
-  // Dev Dashboard catalog id → `saved_catalog_slug` on global search only.
-  // ucp-cli docs: server-supported but NOT listed in the inputSchema, so it is
-  // added after conformance; a wrong value comes back as a `not_found` message.
+  // Dev Dashboard catalog id → `catalog.catalog_id` on Global Catalog calls
+  // (Authenticate your agent, step 2). Search always carries it; lookup /
+  // get_product only when their live schema lists it. If the schema does not
+  // list it, it is the one documented exception to the unknown-field block.
   const { catalogId, catalogUrl } = config()
-  const withSlug = tool === 'search_catalog' && catalogId && business === catalogUrl
-  if (withSlug) (args.catalog as Json).saved_catalog_slug = catalogId
-  const res = await callTool<Json>(business, tool, args, { allowUnknownFields: Boolean(withSlug) })
+  const listed = pathStatus(schema as Json, 'catalog.catalog_id') === 'present'
+  const withId = Boolean(catalogId) && business === catalogUrl && (tool === 'search_catalog' || listed)
+  if (withId) (args.catalog as Json).catalog_id = catalogId
+  const res = await callTool<Json>(business, tool, args, { allowUnknownFields: withId && !listed })
   return { res, dropped }
 }
 

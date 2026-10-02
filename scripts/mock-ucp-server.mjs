@@ -9,6 +9,15 @@
 //   - unknown destination key → destination silently ignored (the incident)
 //   - discount code KAUNA10 → 10 % applied; anything else → warning message
 //   - complete_checkout is not even listed.
+//   - auth like Shopify's flow: POST /auth/access_token issues a fake JWT;
+//     checkout tools REQUIRE `Authorization: Bearer`; cart tools REJECT one
+//     (so a client that sends the token to the wrong surface fails loudly);
+//     every JSON-RPC request must carry MCP-Protocol-Version.
+//     MOCK_REJECT_TOKEN=1 → checkout answers -32000 AuthenticationFailed.
+//   - create_checkout takes a top-level cart_id (cart content wins).
+//
+// Catalog stand-in: run a second instance with MOCK_PORT=8444
+// MOCK_SELLER_PORT=8443 and point SHOPIFY_CATALOG_URL at it.
 //
 // Usage (needs a TLS cert because the app only talks https):
 //   MOCK_TLS_CERT=cert.pem MOCK_TLS_KEY=key.pem node scripts/mock-ucp-server.mjs
@@ -20,6 +29,9 @@ import { randomUUID } from 'node:crypto'
 
 const PORT = Number(process.env.MOCK_PORT ?? 8443)
 const ORIGIN = `https://localhost:${PORT}`
+// Products returned by this instance belong to this seller (a catalog
+// instance on another port still points buyers at the merchant).
+const SELLER_PORT = Number(process.env.MOCK_SELLER_PORT ?? PORT)
 const V = '2026-04-08'
 
 const postal = {
@@ -34,7 +46,7 @@ const postal = {
 const checkoutBody = {
   type: 'object',
   properties: {
-    cart_id: { type: 'string' },
+    currency: { type: 'string' },
     line_items: {
       type: 'array',
       items: { type: 'object', properties: { id: { type: 'string' }, item: { type: 'object', properties: { id: { type: 'string' } } }, quantity: { type: 'integer' } } },
@@ -72,7 +84,9 @@ const tools = [
   { name: 'create_cart', inputSchema: { type: 'object', properties: { meta, cart: cartBody } } },
   { name: 'update_cart', inputSchema: { type: 'object', properties: { meta, id: { type: 'string' }, cart: cartBody } } },
   { name: 'get_cart', inputSchema: { type: 'object', properties: { meta, id: { type: 'string' } } } },
-  { name: 'create_checkout', inputSchema: { type: 'object', properties: { meta, checkout: checkoutBody } } },
+  { name: 'cancel_cart', inputSchema: { type: 'object', properties: { meta, id: { type: 'string' } } } },
+  { name: 'create_checkout', inputSchema: { type: 'object', properties: { meta, cart_id: { type: 'string' }, checkout: checkoutBody } } },
+  { name: 'cancel_checkout', inputSchema: { type: 'object', properties: { meta, id: { type: 'string' } } } },
   { name: 'update_checkout', inputSchema: { type: 'object', properties: { meta, id: { type: 'string' }, checkout: checkoutBody } } },
   { name: 'get_checkout', inputSchema: { type: 'object', properties: { meta, id: { type: 'string' } } } },
   { name: 'search_catalog', inputSchema: { type: 'object', properties: { meta: { type: 'object', properties: { 'ucp-agent': { type: 'object' } } }, catalog: { type: 'object', properties: { query: { type: 'string' }, context: { type: 'object' }, pagination: { type: 'object' }, filters: { type: 'object' } } } } } },
@@ -83,7 +97,7 @@ const tools = [
 const PRICE = 13400
 
 // ── catalog (so the whole UI can be exercised offline) ──────────────────────
-const HOST = `localhost:${PORT}`
+const HOST = `localhost:${SELLER_PORT}`
 const IMG = (c) => `data:image/svg+xml;utf8,${encodeURIComponent(`<svg xmlns='http://www.w3.org/2000/svg' width='600' height='800'><rect width='600' height='800' fill='${c}'/><text x='300' y='420' font-size='40' text-anchor='middle' fill='white' font-family='sans-serif'>mock</text></svg>`)}`
 const seller = { name: 'Aab (mock)', domain: HOST, url: `https://${HOST}`, id: 'gid://shopify/Shop/1' }
 const mkVariant = (id, length, size, available = true) => ({
@@ -199,8 +213,8 @@ function render(co) {
   }
 }
 
-function applyCheckout(co, body) {
-  if (body.cart_id && carts.has(body.cart_id)) co.line_items = carts.get(body.cart_id).line_items
+function applyCheckout(co, body, cartId) {
+  if (cartId && carts.has(cartId)) co.line_items = carts.get(cartId).line_items
   else if (body.line_items?.length) co.line_items = lines(body.line_items, co.line_items)
   co.buyer = body.buyer
   co.codes = body.discounts?.codes
@@ -225,6 +239,14 @@ function call(name, a) {
       totals.push({ type: 'total', amount: totals.reduce((x, t) => x + t.amount, 0) })
       return { ucp: ucpMeta, ...cart, currency: 'USD', totals, fulfillment: dest ? { methods: [{ type: 'shipping', destinations: [dest], groups: [{ id: 'g_1', selected_option_id: 'std', options: [{ id: 'std', title: 'Standard', totals: [{ type: 'total', amount: 1490 }] }] }] }] } : undefined }
     }
+    case 'get_cart': {
+      const cart = carts.get(a.id)
+      return cart ? { ucp: ucpMeta, ...cart, currency: 'USD' } : null
+    }
+    case 'cancel_cart': {
+      carts.delete(a.id)
+      return { ucp: ucpMeta, id: a.id, status: 'canceled' }
+    }
     case 'update_cart': {
       const cart = carts.get(a.id)
       cart.line_items = lines(a.cart.line_items, cart.line_items)
@@ -234,7 +256,7 @@ function call(name, a) {
     case 'create_checkout': {
       // Real shape: gid://shopify/Checkout/{TOKEN}?key={32-char KEY}
       const co = { id: `gid://shopify/Checkout/hWN${randomUUID().replaceAll('-', '').slice(0, 20)}?key=${randomUUID().replaceAll('-', '')}`, line_items: [] }
-      applyCheckout(co, a.checkout)
+      applyCheckout(co, a.checkout, a.cart_id)
       checkouts.set(co.id, co)
       return render(co)
     }
@@ -245,6 +267,11 @@ function call(name, a) {
     }
     case 'get_checkout':
       return render(checkouts.get(a.id))
+    case 'cancel_checkout': {
+      const co = checkouts.get(a.id)
+      co.canceled = true
+      return { ...render(co), status: 'canceled' }
+    }
     case 'search_catalog':
       return { ucp: ucpMeta, products: searchProducts().filter((p) => p.title.toLowerCase().includes(String(a.catalog.query ?? '').toLowerCase().split(' ')[0] ?? '')) }
     case 'lookup_catalog':
@@ -294,6 +321,18 @@ const server = createServer({ cert: readFileSync(process.env.MOCK_TLS_CERT), key
     res.writeHead(status, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify(body))
   }
+  if (req.method === 'POST' && req.url === '/auth/access_token') {
+    readBody(req).then((b) => {
+      const j = JSON.parse(b || '{}')
+      if (j.grant_type !== 'client_credentials' || !j.client_id || !j.client_secret)
+        return send(401, { error: 'invalid_client', error_description: 'Client authentication failed' })
+      const enc = (o) => Buffer.from(JSON.stringify(o)).toString('base64url')
+      const exp = Math.floor(Date.now() / 1000) + 3600
+      const token = `${enc({ alg: 'none', typ: 'JWT' })}.${enc({ scopes: 'read_global_api_catalog_search', exp, limits: { mock: true } })}.mock`
+      send(200, { access_token: token, token_type: 'Bearer', expires_in: 3600 })
+    })
+    return
+  }
   if (req.method === 'GET' && req.url === '/.well-known/ucp') {
     return send(200, { ucp: { version: V, services: { 'dev.ucp.shopping': [{ version: V, transport: 'mcp', endpoint: `${ORIGIN}/api/ucp/mcp` }] }, ...ucpMeta } })
   }
@@ -327,7 +366,21 @@ const server = createServer({ cert: readFileSync(process.env.MOCK_TLS_CERT), key
     req.on('data', (c) => (raw += c))
     req.on('end', () => {
       const rpc = JSON.parse(raw)
+      if (!req.headers['mcp-protocol-version'])
+        return send(200, { jsonrpc: '2.0', id: rpc.id, error: { code: -32600, message: 'MCP-Protocol-Version header missing' } })
+      const bearer = /^Bearer \S+/.test(req.headers.authorization ?? '')
+      const name = rpc.params?.name ?? ''
+      console.log(`[mock] ${rpc.method}${name ? ` ${name}` : ''} auth=${bearer ? 'bearer' : 'none'}`)
+      // Catalog instance (other port): Global Catalog needs the token, tools/list included.
+      if (PORT !== SELLER_PORT && !bearer)
+        return send(200, { jsonrpc: '2.0', id: rpc.id, error: { code: -32000, message: 'AuthenticationRequired: Global Catalog needs a Bearer token' } })
       if (rpc.method === 'tools/list') return send(200, { jsonrpc: '2.0', id: rpc.id, result: { tools } })
+      if (name.endsWith('_checkout') && !bearer)
+        return send(200, { jsonrpc: '2.0', id: rpc.id, error: { code: -32000, message: 'AuthenticationRequired: checkout tools need a Bearer token' } })
+      if (name.endsWith('_checkout') && process.env.MOCK_REJECT_TOKEN === '1')
+        return send(200, { jsonrpc: '2.0', id: rpc.id, error: { code: -32000, message: 'AuthenticationFailed' } })
+      if (name.endsWith('_cart') && bearer)
+        return send(200, { jsonrpc: '2.0', id: rpc.id, error: { code: -32000, message: 'mock: cart tools take no token (client sent one)' } })
       if (rpc.method !== 'tools/call') return send(200, { jsonrpc: '2.0', id: rpc.id, error: { code: -32601, message: 'Method not found' } })
       if (!rpc.params?.arguments?.meta?.['ucp-agent']?.profile)
         return send(200, { jsonrpc: '2.0', id: rpc.id, error: { code: -32001, message: 'UCP discovery failed', data: { code: 'profile_missing' } } })

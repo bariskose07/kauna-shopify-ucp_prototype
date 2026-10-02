@@ -157,13 +157,14 @@ export async function createCheckoutFlow(s: Session, input: CreateInput): Promis
   let c1 = buildCheckoutBody({ draft, facts: cf, cart, includeFulfillment: false })
   let r1
   try {
-    r1 = await logged(s, seller, () => callTool<Json>(seller, 'create_checkout', { checkout: c1.body }))
+    r1 = await logged(s, seller, () => callTool<Json>(seller, 'create_checkout', { ...c1.topLevel, checkout: c1.body }))
   } catch (e) {
     // An expired/unknown cart_id: retry once as buy-now with explicit lines.
-    if (!('cart_id' in c1.body) || !(e instanceof UcpError) || e.kind !== 'jsonrpc') throw e
+    const usedCart = 'cart_id' in c1.body || 'cart_id' in c1.topLevel
+    if (!usedCart || !(e instanceof UcpError) || e.kind !== 'jsonrpc') throw e
     c1 = buildCheckoutBody({ draft, facts: cf, cart: { ...cart, cartId: undefined }, includeFulfillment: false })
     c1.notes.push('cart_id reddedildi → checkout satırlarla (line_items) oluşturuldu.')
-    r1 = await logged(s, seller, () => callTool<Json>(seller, 'create_checkout', { checkout: c1.body }))
+    r1 = await logged(s, seller, () => callTool<Json>(seller, 'create_checkout', { ...c1.topLevel, checkout: c1.body }))
   }
   traces.push(r1.trace)
   let co = extractObject(r1.data, 'checkout')
@@ -171,12 +172,19 @@ export async function createCheckoutFlow(s: Session, input: CreateInput): Promis
   draft.last = co
   draft.buildNotes = c1.notes
 
-  // Step 2 — full update including the shipping destination.
-  const u = buildCheckoutBody({ draft, facts: uf, last: co, includeFulfillment: true })
-  draft.buildNotes = [...new Set([...c1.notes, ...u.notes])]
+  // Step 2 — get_checkout, then a full PUT update including the destination.
+  let u: ReturnType<typeof buildCheckoutBody> | undefined
   try {
+    const g = await logged(s, seller, () => callTool<Json>(seller, 'get_checkout', { id: co.id }))
+    traces.push(g.trace)
+    co = extractObject(g.data, 'checkout')
+    draft.last = co
+    u = buildCheckoutBody({ draft, facts: uf, last: co, includeFulfillment: true })
+    draft.buildNotes = [...new Set([...c1.notes, ...u.notes])]
+    const body = u.body
+    const fault = u.faultInjected
     const r2 = await logged(s, seller, () =>
-      callTool<Json>(seller, 'update_checkout', { id: co.id, checkout: u.body }, { allowUnknownFields: u.faultInjected }),
+      callTool<Json>(seller, 'update_checkout', { id: co.id, checkout: body }, { allowUnknownFields: fault }),
     )
     traces.push(r2.trace)
     co = extractObject(r2.data, 'checkout')
@@ -214,6 +222,9 @@ export async function updateCheckoutFlow(s: Session, sellerInput: string, patch:
 
   const { uf } = await factsFor(seller)
   draft.phonePlacement = uf.phonePlacement
+  // PUT semantics: read the current state first, then send the whole object.
+  const g = await logged(s, seller, () => callTool<Json>(seller, 'get_checkout', { id: draft.checkoutId }))
+  draft.last = extractObject(g.data, 'checkout')
   const u = buildCheckoutBody({ draft, facts: uf, last: draft.last, includeFulfillment: true })
   draft.buildNotes = u.notes
   const r = await logged(s, seller, () =>
@@ -223,7 +234,7 @@ export async function updateCheckoutFlow(s: Session, sellerInput: string, patch:
   draft.last = co
   const a = analyzeCheckout(co, sentFacts(draft, uf, u.body))
   record(s, draft, patch.discountCodes ? 'discount' : 'checkout_update', a)
-  return view(draft, [r.trace], a, uf)
+  return view(draft, [g.trace, r.trace], a, uf)
 }
 
 export async function getCheckoutFlow(s: Session, sellerInput: string): Promise<CheckoutView> {
@@ -235,6 +246,19 @@ export async function getCheckoutFlow(s: Session, sellerInput: string): Promise<
   draft.last = co
   const a = analyzeCheckout(co, { addressSent: false })
   record(s, draft, 'checkout_get', a)
+  return view(draft, [r.trace], a)
+}
+
+/** cancel_checkout (allowed; complete_checkout never is). */
+export async function cancelCheckoutFlow(s: Session, sellerInput: string): Promise<CheckoutView> {
+  const seller = normalizeSeller(sellerInput)
+  const draft = s.checkouts[seller]
+  if (!draft?.checkoutId) throw new UcpError({ kind: 'schema', message: 'Bu satıcı için checkout yok.' })
+  const r = await logged(s, seller, () => callTool<Json>(seller, 'cancel_checkout', { id: draft.checkoutId }))
+  const co = extractObject(r.data, 'checkout')
+  draft.last = co
+  const a = analyzeCheckout(co, { addressSent: false })
+  record(s, draft, 'checkout_get', a, 'cancel_checkout')
   return view(draft, [r.trace], a)
 }
 

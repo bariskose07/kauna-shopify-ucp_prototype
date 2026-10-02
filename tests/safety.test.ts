@@ -60,16 +60,6 @@ describe('maskPII', () => {
   })
 })
 
-describe('token scope', () => {
-  it('sends the Catalog token to the catalog only, never to merchants', async () => {
-    const { shouldSendToken } = await import('../lib/ucp/client')
-    process.env.SHOPIFY_CATALOG_URL = 'https://catalog.shopify.com/api/ucp/mcp'
-    expect(shouldSendToken('https://catalog.shopify.com/api/ucp/mcp')).toBe(true)
-    expect(shouldSendToken('https://aab-usa-v2.myshopify.com/api/ucp/mcp')).toBe(false)
-    delete process.env.SHOPIFY_CATALOG_URL
-  })
-})
-
 describe('429 circuit breaker', () => {
   it('stops calling an endpoint until Retry-After has passed', async () => {
     const { rpc, rateLimitRemaining } = await import('../lib/ucp/client')
@@ -120,35 +110,6 @@ describe('auth attribution', () => {
       expect(rateLimitRemaining(ep)).toBeGreaterThan(100)
     } finally {
       globalThis.fetch = orig
-    }
-  })
-
-  it('token failure degrades the catalog to anonymous and records the reason', async () => {
-    const { rpc, getTokenState } = await import('../lib/ucp/client')
-    process.env.SHOPIFY_CLIENT_ID = 'id'
-    process.env.SHOPIFY_CLIENT_SECRET = 'secret'
-    process.env.SHOPIFY_CATALOG_URL = 'https://catalog.example/api/ucp/mcp'
-    const orig = globalThis.fetch
-    let sawAuthHeader = false
-    globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
-      if (String(url).includes('api.shopify.com'))
-        return new Response(JSON.stringify({ error: 'invalid_client', error_description: 'Client authentication failed' }), { status: 401 })
-      sawAuthHeader = Boolean((init?.headers as Record<string, string>)?.Authorization)
-      return new Response(JSON.stringify({ jsonrpc: '2.0', id: JSON.parse(String(init?.body)).id, result: { tools: [] } }), { status: 200 })
-    }) as typeof fetch
-    try {
-      const info: import('../lib/ucp/client').RpcInfo = {}
-      await rpc('https://catalog.example/api/ucp/mcp', 'tools/list', {}, 0, info)
-      expect(info.auth?.mode).toBe('anonymous')
-      expect(info.auth?.note).toMatch(/invalid_client/)
-      expect(sawAuthHeader).toBe(false)
-      expect(getTokenState()).toMatchObject({ status: 'failed' })
-      expect(getTokenState().error?.message).toMatch(/Client authentication failed/)
-    } finally {
-      globalThis.fetch = orig
-      delete process.env.SHOPIFY_CLIENT_ID
-      delete process.env.SHOPIFY_CLIENT_SECRET
-      delete process.env.SHOPIFY_CATALOG_URL
     }
   })
 })

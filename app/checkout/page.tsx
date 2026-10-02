@@ -141,6 +141,11 @@ function CheckoutInner() {
     await call(() => api<View>(`/api/checkout/status?seller=${encodeURIComponent(seller)}`))
     setStatusMsg(`Durum sorgulandı: ${new Date().toLocaleTimeString()}`)
   }
+  const cancel = async () => {
+    if (!window.confirm('Checkout mağazada iptal edilsin mi (cancel_checkout)?')) return
+    await call(() => api<View>('/api/checkout/cancel', { body: { seller } }))
+    setStatusMsg(`cancel_checkout gönderildi: ${new Date().toLocaleTimeString()}`)
+  }
 
   if (!seller)
     return (
@@ -375,6 +380,9 @@ function CheckoutInner() {
                 <div className="row">
                   <button onClick={() => void checkStatus()} disabled={busy}>
                     Durumu kontrol et
+                  </button>
+                  <button onClick={() => void cancel()} disabled={busy}>
+                    Checkout'u iptal et
                   </button>
                   <span className="small muted grow">
                     {closedOnce ? 'Ödeme penceresi kapandı; durum otomatik sorgulandı. ' : ''}

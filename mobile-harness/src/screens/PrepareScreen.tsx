@@ -69,7 +69,7 @@ export function PrepareScreen({ steps, summary, prepared, running, openResult, o
             </View>
           )}
           <Text style={[s.muted, { marginTop: 6 }]}>
-            Durum: {summary.status} · kimlik yolu: {summary.auth.map((x) => x.auth?.mode).join(', ')}
+            Durum: {summary.status} · kimlik yolu: {summary.auth.map((x) => `${x.step}: ${x.auth?.mode === 'fallback' ? '⚠ ' : ''}${x.auth?.label ?? x.auth?.mode}`).join(', ')}
           </Text>
           {summary.buyerWarnings.length > 0 && (
             <Notice tone="danger">

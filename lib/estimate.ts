@@ -144,8 +144,10 @@ export async function estimateShipping(
     }
     const tmpCart = { seller, cartSupported: false, lineItems: [{ item: { id: variantId }, quantity: 1 }] }
     const c1 = buildCheckoutBody({ draft, facts: cf, cart: tmpCart, includeFulfillment: false })
-    const r1 = await logged(s, seller, () => callTool<Json>(seller, 'create_checkout', { checkout: c1.body }))
-    const co = extractObject(r1.data, 'checkout')
+    const r1 = await logged(s, seller, () => callTool<Json>(seller, 'create_checkout', { ...c1.topLevel, checkout: c1.body }))
+    // PUT: read the current state first.
+    const g = await logged(s, seller, () => callTool<Json>(seller, 'get_checkout', { id: extractObject(r1.data, 'checkout').id }))
+    const co = extractObject(g.data, 'checkout')
     const u = buildCheckoutBody({ draft, facts: uf, last: co, includeFulfillment: true })
     const r2 = await logged(s, seller, () => callTool<Json>(seller, 'update_checkout', { id: co.id, checkout: u.body }))
     notes.push('Kargo, geçici bir checkout ile hesaplandı (sepet tahmini yoktu).')

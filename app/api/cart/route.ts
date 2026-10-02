@@ -39,7 +39,7 @@ export async function POST(req: Request) {
   const state = (s.carts[seller] ??= { seller, cartSupported: true, lineItems: [] })
   const log = (traces: CallTrace[]) => {
     for (const t of traces)
-      pushLog(s, { seller, tool: t.tool, auth: t.auth, surface: t.surface, endpoint: t.endpoint, durationMs: t.durationMs, request: t.request, response: t.response, validation: t.validation })
+      pushLog(s, { seller, tool: t.tool, auth: t.auth, surface: t.surface, endpoint: t.endpoint, durationMs: t.durationMs, request: t.request, response: t.response, raw: t.raw, profile: t.profile, payloadSource: t.payloadSource, validation: t.validation })
   }
   // Snapshot so a rejected change can be rolled back exactly.
   const before = structuredClone(state.lineItems)
@@ -56,7 +56,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ carts: cartsView(s.carts), notes: r.notes, traces: r.traces })
   } catch (e) {
     const t = (e as { details?: { trace?: CallTrace } }).details?.trace
-    if (t) pushLog(s, { seller, tool: t.tool, auth: t.auth, surface: t.surface, endpoint: t.endpoint, request: t.request, error: (e as Error).message, validation: t.validation })
+    if (t) pushLog(s, { seller, tool: t.tool, auth: t.auth, surface: t.surface, profile: t.profile, endpoint: t.endpoint, request: t.request, error: (e as Error).message, validation: t.validation })
     // Roll back the local change the business rejected.
     state.lineItems = before
     if (state.lineItems.length === 0) delete s.carts[seller]

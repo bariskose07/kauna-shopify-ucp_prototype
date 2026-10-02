@@ -85,7 +85,7 @@ export async function mobileUcpCheckout(input: MobileCheckoutInput) {
   const destInCreate = cf.supportsFulfillment && !cf.methodRequired.includes('line_item_ids')
   const c1 = buildCheckoutBody({ draft: { ...draft, phonePlacement: cf.phonePlacement }, facts: cf, cart, includeFulfillment: destInCreate })
   let t = Date.now()
-  const r1 = await callTool<Json>(seller, 'create_checkout', { checkout: c1.body })
+  const r1 = await callTool<Json>(seller, 'create_checkout', { ...c1.topLevel, checkout: c1.body })
   timings.createMs = Date.now() - t
   auth.push({ step: 'create_checkout', auth: r1.trace.auth })
   let co: CommerceObject = extractObject(r1.data, 'checkout')
@@ -96,6 +96,12 @@ export async function mobileUcpCheckout(input: MobileCheckoutInput) {
   const missing = (co.messages ?? []).filter((m) => m.type === 'error' && BUYER_CODES.test(m.code ?? ''))
   const noDest = !(co.fulfillment?.methods ?? []).some((m) => (m.destinations ?? []).length > 0)
   if (uf.supportsFulfillment && (noDest || missing.length > 0)) {
+    // PUT semantics: get_checkout first, then the full object.
+    t = Date.now()
+    const g = await callTool<Json>(seller, 'get_checkout', { id: co.id })
+    timings.getMs = Date.now() - t
+    auth.push({ step: 'get_checkout', auth: g.trace.auth })
+    co = extractObject(g.data, 'checkout')
     const u = buildCheckoutBody({ draft: { ...draft, phonePlacement: uf.phonePlacement }, facts: uf, last: co, includeFulfillment: true })
     notes.push(...u.notes.filter((n) => !notes.includes(n)))
     t = Date.now()

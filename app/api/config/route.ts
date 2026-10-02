@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
 
-import { config } from '@/lib/ucp/client'
+import { MCP_PROTOCOL_VERSION, config, getAuthSettings, profileStatus } from '@/lib/ucp/client'
 
 export const dynamic = 'force-dynamic'
 
@@ -9,8 +9,11 @@ export async function GET() {
   const c = config()
   return NextResponse.json({
     transport: c.transport,
-    auth: c.transport === 'cli' ? 'ucp-cli' : c.hasClientCredentials ? 'client-credentials-bearer' : 'agent-profile-only',
+    auth: c.transport === 'cli' ? 'ucp-cli (test)' : c.hasClientCredentials ? 'client-credentials-bearer' : 'kimlik bilgisi yok',
     profileOverride: c.profileOverride ?? null,
+    profiles: profileStatus(),
+    mcpProtocolVersion: MCP_PROTOCOL_VERSION,
+    settings: getAuthSettings(),
     catalogUrl: c.catalogUrl,
     catalogEndpoint: c.catalogEndpoint ?? null,
     catalogId: c.catalogId ? 'set' : null,

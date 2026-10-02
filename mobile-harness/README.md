@@ -54,7 +54,9 @@ iPhone'da Kamera ile, Android'de Expo Go içinden QR'ı okutun.
   "quantity": 1, "buyer": { … }, "attemptId": "KAUNA-ATT-…" }
 ```
 
-Yanıt: `status`, `totals`, `shipping`, `messages`, `buyerWarnings`, `continueUrl`, `cartToken`, `cartKey`, `auth` (adım başına kimlik yolu: token / imzalı / anonim / CLI), `fieldNotes`, `timings`.
+Yanıt: `status`, `totals`, `shipping`, `messages`, `buyerWarnings`, `continueUrl`, `cartToken`, `cartKey`, `auth` (adım başına kimlik yolu: `token` / `token yok – tasarım gereği` / `token yok – yedek` ⚠ (yalnızca test) / `CLI (test)`), `fieldNotes`, `timings`.
+
+Kimlik kuralı web prototipiyle aynıdır: checkout araçları Shopify token'ı ile çağrılır. Token alınamazsa ya da mağaza reddederse (`AuthenticationFailed`) istek token'sız tekrarlanmaz; hata özet ekranında görünür. Token yalnızca sunucuda kalır.
 
 - **Durumsuzdur.** `cartToken`/`cartKey` yalnızca bu yanıtta döner; sunucu bunları saklamaz, loglarda yalnızca ilk 6 karakter görünür.
 - `attribution.utm_content` = telefondaki deneme numarası. Günlükteki kayıtla mağaza tarafı eşleştirilebilir.

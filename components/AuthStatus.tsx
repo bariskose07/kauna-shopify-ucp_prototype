@@ -2,29 +2,59 @@
 import { usePathname } from 'next/navigation'
 import { useEffect, useState } from 'react'
 
-interface Status {
+type Mode = 'token' | 'none' | 'fallback' | 'cli'
+interface AuthInfo {
+  mode: Mode
+  label: string
+  note?: string
+  profile?: string
+}
+export interface AuthStatusData {
   transport: string
-  token: { configured: boolean; status: string; expiresInMin: number | null; error: { message: string; httpStatus: number | null } | null }
-  signed: { implemented: boolean; note: string }
+  mcpProtocolVersion: string
+  settings: { tokenlessFallback: boolean; cliTransport: boolean }
+  profiles: { catalog: string; cartCheckout: string; override: { url: string; used: boolean; reason?: string } | null }
+  token: {
+    configured: boolean
+    status: 'not-configured' | 'not-requested' | 'ok' | 'failed'
+    credentialSource: string | null
+    warning: string | null
+    scopes: string[] | null
+    limits: unknown
+    expiresAt: number | null
+    expiresInMin: number | null
+    error: { message: string; httpStatus: number | null; at: number } | null
+    rejected: { at: number; host: string; tool: string; message: string } | null
+  }
   surfaces: {
     surface: string
     label: string
-    expected: string
-    last: { auth: { mode: string; note?: string }; ok: boolean; error?: string; host: string; tool: string; at: number } | null
+    needsToken: boolean
+    expected: Mode
+    expectedLabel: string
+    blocked: boolean
+    last: { auth: AuthInfo; ok: boolean; error?: string; authRejected: boolean; host: string; tool: string; at: number } | null
     rateLimitedFor: number | null
   }[]
 }
 
-const MODE_TR: Record<string, string> = { token: 'token', signed: 'imzalı', anonymous: 'anonim', cli: 'CLI yedeği' }
+// Bar text: "token ✓", "token yok (tasarım gereği)", "token yok – yedek ⚠".
+const SHORT: Record<Mode, string> = {
+  token: 'token',
+  none: 'token yok (tasarım gereği)',
+  fallback: 'token yok – yedek',
+  cli: 'CLI (test)',
+}
 
 /**
  * Compact indicator under the header:
- *   Global Catalog: token ✓ · Mağaza katalog: anonim · Sepet: anonim · Checkout: anonim ⏳ 58 dk
- * Tap to expand details (token failure reason, last error per surface).
+ *   Global Catalog: token ✓ · Mağaza katalog: token yok (tasarım gereği) · Sepet: token yok (tasarım gereği) · Checkout: token ✓
+ * plus a persistent banner while the token cannot be obtained or is rejected.
+ * Tap the row to expand details.
  */
 export function AuthStatus() {
   const path = usePathname()
-  const [s, setS] = useState<Status | null>(null)
+  const [s, setS] = useState<AuthStatusData | null>(null)
   const [open, setOpen] = useState(false)
 
   useEffect(() => {
@@ -32,7 +62,7 @@ export function AuthStatus() {
     const load = () =>
       fetch('/api/auth-status', { cache: 'no-store' })
         .then((r) => r.json())
-        .then((j: Status) => alive && setS(j))
+        .then((j: AuthStatusData) => alive && setS(j))
         .catch(() => {})
     void load()
     const t = setInterval(load, 15_000)
@@ -43,52 +73,95 @@ export function AuthStatus() {
   }, [path])
 
   if (!s) return null
-  const tokenFailed = s.token.status === 'failed'
+  const t = s.token
+  const tokenProblem =
+    t.status === 'failed'
+      ? `Token alınamadı: ${t.error?.message ?? 'bilinmeyen neden'}${t.error?.httpStatus && !t.error.message.includes(`HTTP ${t.error.httpStatus}`) ? ` (HTTP ${t.error.httpStatus})` : ''}`
+      : t.status === 'not-configured'
+        ? 'Token alınamadı: SHOPIFY_CLIENT_ID / SHOPIFY_CLIENT_SECRET .env içinde tanımlı değil'
+        : null
+  // A rejection stays visible until a later token call on that surface succeeds.
+  const rejectedStill =
+    t.rejected && s.surfaces.some((x) => x.needsToken && x.last && x.last.at >= t.rejected!.at && !x.last.ok && x.last.authRejected)
 
   return (
     <div className="authbar">
+      {tokenProblem && (
+        <div className="authbar-alert" role="alert">
+          <b>{tokenProblem}</b>
+          <span>
+            {' '}
+            — Global Catalog ve Checkout istekleri{' '}
+            {s.settings.tokenlessFallback ? "token'sız YEDEK olarak gönderiliyor (yalnızca test)." : 'gönderilmiyor.'}
+          </span>
+        </div>
+      )}
+      {rejectedStill && t.rejected && (
+        <div className="authbar-alert" role="alert">
+          <b>AuthenticationFailed</b> — {t.rejected.host} token’ı reddetti ({t.rejected.tool}).{' '}
+          {s.settings.tokenlessFallback ? "Token'sız yedek denendi (test ayarı)." : "Token'sız tekrar denenmedi."}
+        </div>
+      )}
+      {t.warning && <div className="authbar-alert warn">{t.warning}</div>}
+      {s.settings.tokenlessFallback && (
+        <div className="authbar-alert warn">Test ayarı açık: token reddedilir/alınamazsa istek token’sız tekrarlanır (“token yok – yedek”).</div>
+      )}
       <button className="authbar-row" onClick={() => setOpen((o) => !o)} aria-expanded={open} title="Kimlik yolu ve son durum">
         {s.surfaces.map((x, i) => {
           const mode = x.last?.auth.mode ?? x.expected
-          const tone = x.rateLimitedFor ? 'warn' : x.last && !x.last.ok ? 'bad' : x.last?.ok ? 'good' : 'idle'
+          const failed = x.blocked || (x.last && !x.last.ok)
+          const tone = x.rateLimitedFor ? 'warn' : failed ? 'bad' : x.last?.ok ? 'good' : 'idle'
+          const mark = failed ? ' ✗' : x.last?.ok && mode !== 'none' ? ' ✓' : ''
           return (
             <span key={x.surface} className="authbar-item">
               {i > 0 && <span className="sep">·</span>}
-              {x.label}: <b className={`mode ${mode}`}>{MODE_TR[mode] ?? mode}</b>
+              {x.label}:{' '}
+              <b className={`mode ${mode}${failed ? " fail" : ""}`}>
+                {SHORT[mode] ?? mode}
+                {mode === 'fallback' ? ' ⚠' : ''}
+                {mark}
+              </b>
               <span className={`dot ${tone}`} aria-label={tone} />
               {x.rateLimitedFor ? <span className="rl">⏳ {Math.ceil(x.rateLimitedFor / 60)} dk</span> : null}
             </span>
           )
         })}
-        {tokenFailed && <span className="authbar-item bad-text">· Token başarısız</span>}
       </button>
       {open && (
         <div className="authbar-details small">
           <div>
             <b>Token</b>:{' '}
-            {!s.token.configured
-              ? 'yapılandırılmadı (SHOPIFY_CLIENT_ID/SECRET yok) → her şey anonim'
-              : s.token.status === 'ok'
-                ? `geçerli (${s.token.expiresInMin} dk kaldı) — yalnızca Global Catalog’a gönderiliyor`
-                : s.token.status === 'failed'
-                  ? `BAŞARISIZ${s.token.error?.httpStatus ? ` (HTTP ${s.token.error.httpStatus})` : ''}: ${s.token.error?.message} → Global Catalog anonim devam ediyor`
-                  : 'henüz istenmedi (ilk Catalog isteğinde alınır)'}
+            {t.status === 'ok'
+              ? `geçerli · ${t.expiresInMin} dk kaldı · kapsamlar: ${t.scopes?.length ? t.scopes.join(', ') : '(token içinde yok)'}`
+              : t.status === 'not-requested'
+                ? 'henüz istenmedi (ilk Global Catalog / Checkout isteğinde alınır)'
+                : tokenProblem}
+            {t.credentialSource ? <span className="muted"> · kaynak: {t.credentialSource}</span> : null}
           </div>
           <div>
-            <b>İmzalı</b>: {s.signed.note}
+            <b>Kural</b>: Global Catalog ve checkout araçları → Bearer token · mağaza kataloğu ve sepet araçları → token yok (tasarım gereği) ·
+            MCP-Protocol-Version: {s.mcpProtocolVersion}
+          </div>
+          <div>
+            <b>Profiller</b>: katalog <span className="mono">{s.profiles.catalog.split('/').slice(-2).join('/')}</span> · sepet/checkout{' '}
+            <span className="mono">{s.profiles.cartCheckout.split('/').slice(-2).join('/')}</span>
+            {s.profiles.override && !s.profiles.override.used ? (
+              <span className="muted"> (UCP_AGENT_PROFILE_URL kullanılmadı: {s.profiles.override.reason ?? 'henüz denetlenmedi'})</span>
+            ) : null}
           </div>
           {s.transport === 'cli' && (
             <div>
-              <b>Taşıma</b>: UCP_TRANSPORT=cli — tüm istekler @shopify/ucp-cli üzerinden
+              <b>Taşıma</b>: CLI adaptörü (test ayarı) — tüm istekler @shopify/ucp-cli üzerinden
             </div>
           )}
           {s.surfaces.map((x) => (
             <div key={x.surface}>
-              <b>{x.label}</b>: sıradaki istek <b>{MODE_TR[x.expected] ?? x.expected}</b>
+              <b>{x.label}</b>: sıradaki istek <b>{x.expectedLabel}</b>
+              {x.blocked ? <span className="bad-text"> — gönderilmeyecek (token yok)</span> : null}
               {x.last ? (
                 <>
                   {' '}
-                  · son: {x.last.tool} @ {x.last.host} → {x.last.ok ? 'başarılı' : x.last.error}
+                  · son: {x.last.tool} @ {x.last.host} [{x.last.auth.label}] → {x.last.ok ? 'başarılı' : x.last.error}
                   {x.last.auth.note ? <span className="muted"> ({x.last.auth.note})</span> : null}
                 </>
               ) : (

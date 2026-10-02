@@ -218,6 +218,11 @@ export default function DebugPage() {
                 {e.auth.tokenExpiresAt ? ` · bitiş ${new Date(e.auth.tokenExpiresAt).toLocaleTimeString()}` : ''}
               </div>
             )}
+            {e.auth?.buyerIpSource && (
+              <div>
+                Shopify-Buyer-IP: <span className="mono">{e.auth.buyerIp ?? '—'}</span> ({e.auth.buyerIpSource})
+              </div>
+            )}
             {e.payloadSource && <div>Yanıt kaynağı: {e.payloadSource}</div>}
             {e.notes?.map((n) => <div key={n}>{n}</div>)}
             <div>İstek:</div>

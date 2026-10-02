@@ -32,7 +32,7 @@ export interface DebugEntry {
    * Identity path: token / none ("token yok – tasarım gereği") /
    * fallback ("token yok – yedek", test only) / cli. Never the token itself.
    */
-  auth?: { mode: string; label?: string; note?: string; profile?: string; tokenScopes?: string[]; tokenExpiresAt?: number }
+  auth?: { mode: string; label?: string; note?: string; profile?: string; tokenScopes?: string[]; tokenExpiresAt?: number; buyerIp?: string; buyerIpSource?: string }
   surface?: string
   /** Agent profile sent in meta["ucp-agent"].profile. */
   profile?: string

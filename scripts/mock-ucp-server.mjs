@@ -13,6 +13,7 @@
 //     checkout tools REQUIRE `Authorization: Bearer`; cart tools REJECT one
 //     (so a client that sends the token to the wrong surface fails loudly);
 //     every JSON-RPC request must carry MCP-Protocol-Version.
+//     Checkout tools also need `Shopify-Buyer-IP` (422 "Missing required buyer IP header." like live).
 //     MOCK_REJECT_TOKEN=1 → checkout answers -32000 AuthenticationFailed.
 //   - create_checkout takes a top-level cart_id (cart content wins).
 //
@@ -370,13 +371,17 @@ const server = createServer({ cert: readFileSync(process.env.MOCK_TLS_CERT), key
         return send(200, { jsonrpc: '2.0', id: rpc.id, error: { code: -32600, message: 'MCP-Protocol-Version header missing' } })
       const bearer = /^Bearer \S+/.test(req.headers.authorization ?? '')
       const name = rpc.params?.name ?? ''
-      console.log(`[mock] ${rpc.method}${name ? ` ${name}` : ''} auth=${bearer ? 'bearer' : 'none'}`)
+      console.log(`[mock] ${rpc.method}${name ? ` ${name}` : ''} auth=${bearer ? 'bearer' : 'none'}${req.headers['shopify-buyer-ip'] ? ' buyer-ip=yes' : ''}`)
       // Catalog instance (other port): Global Catalog needs the token, tools/list included.
       if (PORT !== SELLER_PORT && !bearer)
         return send(200, { jsonrpc: '2.0', id: rpc.id, error: { code: -32000, message: 'AuthenticationRequired: Global Catalog needs a Bearer token' } })
       if (rpc.method === 'tools/list') return send(200, { jsonrpc: '2.0', id: rpc.id, result: { tools } })
       if (name.endsWith('_checkout') && !bearer)
         return send(200, { jsonrpc: '2.0', id: rpc.id, error: { code: -32000, message: 'AuthenticationRequired: checkout tools need a Bearer token' } })
+      // Live behaviour (2026-10-02): token-authenticated checkout without the
+      // buyer's IP → HTTP 422, -32000 AuthenticationFailed, data "Missing required buyer IP header."
+      if (name.endsWith('_checkout') && !/^[0-9a-f.:]+$/i.test(String(req.headers['shopify-buyer-ip'] ?? '')))
+        return send(422, { jsonrpc: '2.0', id: rpc.id, error: { code: -32000, message: 'AuthenticationFailed', data: 'Missing required buyer IP header.' } })
       if (name.endsWith('_checkout') && process.env.MOCK_REJECT_TOKEN === '1')
         return send(200, { jsonrpc: '2.0', id: rpc.id, error: { code: -32000, message: 'AuthenticationFailed' } })
       if (name.endsWith('_cart') && bearer)

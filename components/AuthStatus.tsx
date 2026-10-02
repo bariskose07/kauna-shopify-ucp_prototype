@@ -12,6 +12,7 @@ interface AuthInfo {
 export interface AuthStatusData {
   transport: string
   mcpProtocolVersion: string
+  buyerIp?: { env: string | null }
   settings: { tokenlessFallback: boolean; cliTransport: boolean }
   profiles: { catalog: string; cartCheckout: string; override: { url: string; used: boolean; reason?: string } | null }
   token: {
@@ -141,6 +142,12 @@ export function AuthStatus() {
           <div>
             <b>Kural</b>: Global Catalog ve checkout araçları → Bearer token · mağaza kataloğu ve sepet araçları → token yok (tasarım gereği) ·
             MCP-Protocol-Version: {s.mcpProtocolVersion}
+          </div>
+          <div>
+            <b>Shopify-Buyer-IP</b> (checkout çağrıları):{' '}
+            {s.buyerIp?.env
+              ? `UCP_BUYER_IP ${s.buyerIp.env} (istek genel bir IP'den gelmiyorsa)`
+              : "isteğin genel IP'si; yerelde .env içine UCP_BUYER_IP=<genel IP> ekleyin"}
           </div>
           <div>
             <b>Profiller</b>: katalog <span className="mono">{s.profiles.catalog.split('/').slice(-2).join('/')}</span> · sepet/checkout{' '}

@@ -11,6 +11,8 @@ import {
   declaresCartAndCheckout,
   getAccessToken,
   getTokenState,
+  isPublicIp,
+  maskIp,
   rpc,
   setAuthSettings,
   surfaceOf,
@@ -50,7 +52,7 @@ const tools = [
  * Fake network: token endpoint, merchant /.well-known/ucp and MCP endpoint.
  * `rejectToken` → the merchant answers like aab-usa-v2 did live.
  */
-function fakeNet(opts: { tokenOk?: boolean; rejectToken?: boolean; exp?: number } = {}) {
+function fakeNet(opts: { tokenOk?: boolean; rejectToken?: boolean; requireBuyerIp?: boolean; exp?: number } = {}) {
   const seen: Seen[] = []
   const orig = globalThis.fetch
   globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
@@ -75,6 +77,11 @@ function fakeNet(opts: { tokenOk?: boolean; rejectToken?: boolean; exp?: number 
     const body = JSON.parse(String(init?.body)) as Seen['body'] & { id: number }
     seen.push({ url, headers, body })
     if (body.method === 'tools/list') return new Response(JSON.stringify({ jsonrpc: '2.0', id: body.id, result: { tools } }), { status: 200 })
+    if (opts.requireBuyerIp && body.params?.name?.endsWith('_checkout') && !headers['Shopify-Buyer-IP'])
+      return new Response(
+        JSON.stringify({ jsonrpc: '2.0', id: body.id, error: { code: -32000, message: 'AuthenticationFailed', data: 'Missing required buyer IP header.' } }),
+        { status: 422 },
+      )
     if (opts.rejectToken && headers.Authorization)
       return new Response(JSON.stringify({ jsonrpc: '2.0', id: body.id, error: { code: -32000, message: 'AuthenticationFailed' } }), { status: 200 })
     const out = { id: 'gid://shopify/Checkout/abc?key=k', status: 'incomplete', line_items: [] }
@@ -97,6 +104,7 @@ afterEach(() => {
   delete process.env.SHOPIFY_CATALOG_URL
   delete process.env.SHOPIFY_API_KEY
   delete process.env.SHOPIFY_API_SECRET
+  delete process.env.UCP_BUYER_IP
   reset()
 })
 
@@ -239,5 +247,39 @@ describe('agent profile override', () => {
     expect(declaresCartAndCheckout({ ucp: { capabilities: { 'dev.ucp.shopping.cart': [], 'dev.ucp.shopping.checkout': [] } } })).toBe(true)
     expect(declaresCartAndCheckout({ ucp: { capabilities: [{ name: 'dev.ucp.shopping.cart' }, { name: 'dev.ucp.shopping.checkout' }] } })).toBe(true)
     expect(declaresCartAndCheckout({ ucp: { capabilities: { 'dev.ucp.shopping.checkout': [] } } })).toBe(false)
+  })
+})
+
+describe('Shopify-Buyer-IP', () => {
+  it('checkout calls carry the buyer IP; cart calls do not', async () => {
+    process.env.UCP_BUYER_IP = '203.0.113.7'
+    const net = fakeNet({ requireBuyerIp: true })
+    try {
+      const r = await callTool(MERCHANT, 'create_checkout', { checkout: {} })
+      await callTool(MERCHANT, 'create_cart', { cart: {} })
+      expect(net.seen.find((x) => x.body?.params?.name === 'create_checkout')!.headers['Shopify-Buyer-IP']).toBe('203.0.113.7')
+      expect(net.seen.find((x) => x.body?.params?.name === 'create_cart')!.headers['Shopify-Buyer-IP']).toBeUndefined()
+      expect(r.trace.auth).toMatchObject({ buyerIp: '203.0.x.x', buyerIpSource: 'UCP_BUYER_IP' })
+    } finally {
+      net.restore()
+    }
+  })
+
+  it('missing IP is reported as such, not as a token rejection', async () => {
+    const net = fakeNet({ requireBuyerIp: true })
+    try {
+      const err = await callTool(MERCHANT, 'create_checkout', { checkout: {} }).catch((e) => e)
+      expect(err).toMatchObject({ kind: 'jsonrpc', httpStatus: 422 })
+      expect(err.message).toMatch(/Shopify-Buyer-IP/)
+      expect(getTokenState().rejected).toBeUndefined()
+    } finally {
+      net.restore()
+    }
+  })
+
+  it('only public addresses count as a buyer IP', () => {
+    for (const ip of ['127.0.0.1', '192.168.1.34', '10.0.0.2', '172.20.1.1', '::1', 'fe80::1', '::ffff:192.168.0.1']) expect(isPublicIp(ip)).toBe(false)
+    for (const ip of ['203.0.113.7', '85.105.1.2', '2a02:aa1::1']) expect(isPublicIp(ip)).toBe(true)
+    expect(maskIp('85.105.1.2')).toBe('85.105.x.x')
   })
 })

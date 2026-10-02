@@ -56,6 +56,7 @@ npm run typecheck
 | `UCP_CLI_BIN` | Hayır | CLI adaptöründe `ucp` ikilisinin yolu. |
 | `SHOPIFY_CATALOG_URL` | Hayır | Dev Dashboard'daki Catalog MCP uç noktası (ör. `https://catalog.shopify.com/api/ucp/mcp`). Olduğu gibi kullanılır. |
 | `SHOPIFY_CATALOG_ID` | Hayır | Dev Dashboard katalog kimliği. Global Catalog aramasında `catalog.catalog_id` olarak gönderilir (lookup / get_product'ta şema listeliyorsa). |
+| `UCP_BUYER_IP` | Yerelde evet | Checkout çağrılarındaki `Shopify-Buyer-IP` için genel IP. Gelen isteğin IP'si genelse o kullanılır. |
 | `SHOPIFY_AUTH_URL` | Hayır | Yalnızca çevrimdışı sahte sunucu için token uç noktası (varsayılan `https://api.shopify.com/auth/access_token`). |
 | `UCP_CATALOG_URL` | Hayır | Global Catalog işletme URL'si (varsayılan `https://catalog.shopify.com`, `/.well-known/ucp` ile keşfedilir). |
 | `DEFAULT_SELLER` | Hayır | Arayüzdeki varsayılan satıcı (varsayılan `https://us.aabcollection.com`). |
@@ -77,6 +78,7 @@ Hiçbir değişken `NEXT_PUBLIC_` değildir; sırlar tarayıcıya gitmez. `.env*
 | Checkout | `create_checkout`, `get_checkout`, `update_checkout`, `cancel_checkout` | `Bearer <token>` | `…/cart-and-checkout.json` |
 
 - Her JSON-RPC isteğinde `MCP-Protocol-Version: 2026-03-26`.
+- Token'lı checkout çağrılarında `Shopify-Buyer-IP` (alıcının genel IP'si) ve alıcının `User-Agent`'ı gönderilir. Shopify bunsuz `422 "Missing required buyer IP header."` döndürür. Yerel testte `.env` içine `UCP_BUYER_IP=$(curl -s https://api.ipify.org)` ekleyin.
 - Mağaza uç noktası `/.well-known/ucp` → `dev.ucp.shopping` MCP girişi; okunamazsa `{mağaza}/api/ucp/mcp`.
 - **Token** tek fonksiyondan (`getAccessToken`) gelir. JWT içindeki `scopes`, `exp`, `limits` okunur (token'ın kendisi hiçbir yerde gösterilmez; günlükte yalnızca ilk 6 karakter).
 - **Sessiz yedek yok.** Token alınamazsa token gerektiren istek **gönderilmez**. Üst çubukta kalıcı kırmızı band: "Token alınamadı: <neden>". Mağaza token'ı reddederse (`AuthenticationFailed`, HTTP 401/403) hata olduğu gibi gösterilir ve token'sız tekrar denenmez.

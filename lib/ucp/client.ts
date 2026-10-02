@@ -16,6 +16,7 @@
 // Server-only module: never import from a client component.
 
 import { randomUUID } from 'node:crypto'
+import { isIP } from 'node:net'
 
 import { maskPII } from '../mask'
 import { UcpError, parseRetryAfter } from './errors'
@@ -435,6 +436,69 @@ async function discoverWellKnown(origin: string): Promise<Discovered> {
 
 let rpcId = 1
 
+// ─── buyer context (Shopify-Buyer-IP) ────────────────────────────────────────
+// Shopify's Checkout MCP requires `Shopify-Buyer-IP` (the buyer's IPv4/IPv6)
+// on token-authenticated checkout calls; without it: HTTP 422 / -32000
+// "AuthenticationFailed" with data "Missing required buyer IP header." (seen
+// live 2026-10-02). Header name from Shopify's own demo
+// (shopify-apac-ts/shopify-ucp-demo-mcp, src/checkout.ts). The buyer's
+// User-Agent is forwarded the same way.
+//
+// Source of the IP: the incoming request (X-Forwarded-For / X-Real-IP, only
+// trustworthy behind your own proxy) when it is a public address; otherwise
+// UCP_BUYER_IP (local testing: localhost / Wi-Fi addresses are private).
+
+export interface BuyerContext {
+  ip?: string
+  ipSource?: 'istek' | 'UCP_BUYER_IP'
+  userAgent?: string
+}
+
+/** Private, loopback, link-local and unique-local addresses are not a buyer's IP. */
+export function isPublicIp(ip: string): boolean {
+  const v = isIP(ip)
+  if (v === 4) {
+    const [a, b] = ip.split('.').map(Number)
+    return !(a === 10 || a === 127 || a === 0 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127))
+  }
+  if (v === 6) {
+    const l = ip.toLowerCase()
+    if (l.startsWith('::ffff:')) return isPublicIp(l.slice(7))
+    return !(l === '::1' || l === '::' || l.startsWith('fc') || l.startsWith('fd') || l.startsWith('fe8') || l.startsWith('fe9') || l.startsWith('fea') || l.startsWith('feb'))
+  }
+  return false
+}
+
+export async function buyerContext(): Promise<BuyerContext> {
+  let reqIp: string | undefined
+  let userAgent: string | undefined
+  try {
+    // Only inside a Next.js request; anywhere else (tests, scripts) this throws.
+    const { headers } = await import('next/headers')
+    const h = await headers()
+    reqIp = (h.get('x-forwarded-for')?.split(',')[0] ?? h.get('x-real-ip') ?? '').trim() || undefined
+    userAgent = h.get('user-agent') ?? undefined
+  } catch {
+    /* no request scope */
+  }
+  if (reqIp && isPublicIp(reqIp)) return { ip: reqIp, ipSource: 'istek', userAgent }
+  const env = process.env.UCP_BUYER_IP?.trim()
+  if (env && isIP(env)) return { ip: env, ipSource: 'UCP_BUYER_IP', userAgent }
+  return { userAgent }
+}
+
+/** For logs/UI: keep only the network part (IPv4 a.b.x.x, IPv6 first 2 groups). */
+export function maskIp(ip: string | undefined): string | undefined {
+  if (!ip) return undefined
+  if (isIP(ip) === 4) return ip.split('.').slice(0, 2).join('.') + '.x.x'
+  return ip.split(':').slice(0, 2).join(':') + ':…'
+}
+
+const BUYER_IP_MISSING = /buyer IP header/i
+export function isBuyerIpError(e: unknown): boolean {
+  return e instanceof UcpError && BUYER_IP_MISSING.test(`${e.message} ${JSON.stringify(e.data ?? '')}`)
+}
+
 // ─── per-call auth policy ───────────────────────────────────────────────────
 
 export type Surface = 'global-catalog' | 'merchant-catalog' | 'cart' | 'checkout'
@@ -481,6 +545,9 @@ export interface AuthInfo {
   /** Token facts at send time (never the token itself). */
   tokenScopes?: string[]
   tokenExpiresAt?: number
+  /** Shopify-Buyer-IP sent (masked) and where it came from. */
+  buyerIp?: string
+  buyerIpSource?: string
 }
 
 function authInfo(mode: AuthMode, extra: Partial<AuthInfo> = {}): AuthInfo {
@@ -618,11 +685,15 @@ export interface RpcInfo {
   auth?: AuthInfo
   /** Profile to report (rpc does not read params). */
   profile?: string
+  /** Buyer IP / User-Agent forwarded on checkout calls. */
+  buyer?: BuyerContext
 }
 
 /** A business saying "your token is not accepted here". */
 export function isAuthRejection(e: unknown): boolean {
   if (!(e instanceof UcpError)) return false
+  // Same -32000 "AuthenticationFailed" envelope, but the token was fine.
+  if (isBuyerIpError(e)) return false
   if (e.kind === 'auth' && (e.details as { rejected?: boolean } | undefined)?.rejected) return true
   if (e.httpStatus === 401 || e.httpStatus === 403) return true
   const text = `${e.message} ${JSON.stringify(e.data ?? '')}`
@@ -698,9 +769,30 @@ export async function rpc<T = unknown>(
     }
   }
 
+  // Checkout calls carry the buyer's IP (and User-Agent) — see buyerContext().
+  if (surface === 'checkout' && CHECKOUT_TOOLS.has(tool)) {
+    const b = info.buyer ?? (await buyerContext())
+    if (b.ip) headers['Shopify-Buyer-IP'] = b.ip
+    if (b.userAgent) headers['User-Agent'] = b.userAgent
+    if (info.auth) {
+      info.auth.buyerIp = b.ip ? maskIp(b.ip) : undefined
+      info.auth.buyerIpSource = b.ip ? b.ipSource : 'yok — .env içinde UCP_BUYER_IP tanımlayın'
+    }
+  }
+
   try {
     return await send<T>(endpoint, method, params, headers, attempt)
   } catch (e) {
+    if (isBuyerIpError(e)) {
+      const err = e as UcpError
+      throw new UcpError({
+        kind: 'jsonrpc',
+        rpcCode: err.rpcCode,
+        httpStatus: err.httpStatus,
+        data: err.data,
+        message: `Alıcı IP başlığı eksik/geçersiz (Shopify-Buyer-IP) — ${host} token'ı kabul etti ama alıcının genel IP adresini istiyor (${tool}). ${headers['Shopify-Buyer-IP'] ? 'Gönderilen IP reddedildi.' : "Yerel testte .env'ye UCP_BUYER_IP=<genel IP> ekleyin."} Mağaza yanıtı: ${err.message}`,
+      })
+    }
     if (info.auth?.mode !== 'token' || !isAuthRejection(e)) throw e
     const err = e as UcpError
     tokenState.rejected = { at: Date.now(), host, tool, message: err.message.slice(0, 240) }
@@ -708,7 +800,8 @@ export async function rpc<T = unknown>(
     if (settings.tokenlessFallback) {
       // Test-only: same call once more without the token, clearly labelled.
       info.auth = authInfo('fallback', { profile, note: `token reddedildi (${err.rpcCode ?? err.httpStatus ?? 'auth'}) → token'sız yedek` })
-      return send<T>(endpoint, method, params, {}, attempt)
+      const { Authorization: _drop, ...rest } = headers
+      return send<T>(endpoint, method, params, rest, attempt)
     }
     throw new UcpError({
       kind: 'auth',
@@ -943,6 +1036,18 @@ export async function callTool<T = Json>(
   if (!metaDescribed || pathStatus(schema, 'meta.idempotency-key') !== 'absent') meta['idempotency-key'] = randomUUID()
   const wireArgs: Json = { ...args, meta }
 
+  // UCP signals (dev.ucp.buyer_ip / dev.ucp.user_agent) only where the live
+  // schema lists `<body>.signals` — Shopify enforces the header, not this.
+  const bodyKey = ['checkout', 'cart'].find((k) => wireArgs[k] && typeof wireArgs[k] === 'object')
+  let buyer: BuyerContext | undefined
+  if (surface === 'checkout' && bodyKey && pathStatus(schema, `${bodyKey}.signals`) === 'present') {
+    buyer = await buyerContext()
+    const signals: Record<string, string> = {}
+    if (buyer.ip) signals['dev.ucp.buyer_ip'] = buyer.ip
+    if (buyer.userAgent) signals['dev.ucp.user_agent'] = buyer.userAgent
+    if (Object.keys(signals).length) wireArgs[bodyKey] = { ...(wireArgs[bodyKey] as Json), signals }
+  }
+
   // Rule 4: pre-flight against the live inputSchema.
   const validation = validate(tool.inputSchema, wireArgs)
   const trace: CallTrace = {
@@ -968,7 +1073,7 @@ export async function callTool<T = Json>(
   }
 
   const started = Date.now()
-  const info: RpcInfo = { profile }
+  const info: RpcInfo = { profile, buyer }
   try {
     const raw = await rpc(disc.endpoint, 'tools/call', { name: toolName, arguments: wireArgs }, 0, info)
     trace.auth = info.auth

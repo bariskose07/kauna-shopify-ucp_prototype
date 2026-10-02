@@ -7,6 +7,7 @@ import {
   getAuthSettings,
   getSurfaceStatus,
   getTokenState,
+  maskIp,
   profileStatus,
   rateLimitRemaining,
   setAuthSettings,
@@ -64,6 +65,8 @@ export async function GET() {
     {
       transport: c.transport,
       mcpProtocolVersion: MCP_PROTOCOL_VERSION,
+      // Shopify-Buyer-IP: request IP when public, else UCP_BUYER_IP (local testing).
+      buyerIp: { env: maskIp(process.env.UCP_BUYER_IP?.trim() || undefined) ?? null },
       settings: st,
       profiles: profileStatus(),
       token: {

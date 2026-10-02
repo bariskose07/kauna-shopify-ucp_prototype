@@ -216,5 +216,34 @@ node --env-file=.env scripts/verify-auth-flow.mjs
 - **Reddederse:** token'ın kapsamı (1. adımdaki `scopes`) checkout için yetersiz olabilir. Dev Dashboard'da checkout kapsamı ya da Shopify'dan erişim gerekebilir. Bu, "Next steps" sayfalarındaki onay sürecine bağlı. Uygulama bu durumda checkout'u durdurur ve hatayı gösterir.
 - **Sadece test için:** Ayarlar'daki yedek açılarak eski davranış (token'sız) denenebilir.
 
-_(sonuçlar bekleniyor)_
+**İlk canlı çalıştırma (2026-10-02 13:56 UTC, kullanıcının Mac'i):**
+
+| # | Adım | Kimlik yolu | Sonuç | Ayrıntı |
+| --- | --- | --- | --- | --- |
+| 1 | Token | api.shopify.com | ok | scopes=`read_global_api_catalog_search write_global_api_app_events` · 60 dk · limits=`{"catalog":{"max":5,"period":1}}` |
+| 2 | Global Catalog "Green Tartan Maxi" | token | ok | 5 ürün, `catalog.catalog_id` gönderildi, mesaj `price_filter_applied` |
+| 3 | Keşif | — | ok | `https://aab-usa-v2.myshopify.com/api/ucp/mcp` (UCP **2026-08-25**) |
+| 4 | `create_cart` | token yok – tasarım gereği | ok | cart id `gid://shopify/Cart/hWN…?key=…` |
+| 5 | `create_checkout` (üst düzey `cart_id`) | token | **HTTP 422, -32000 `AuthenticationFailed`**, `data: "Missing required buyer IP header."` | |
+| 6, 8 | — | — | atlandı | |
+
+**Yorum:**
+- Token **reddedilmedi**. Hata kodu "AuthenticationFailed" diyor ama asıl neden `data` alanında: alıcı IP başlığı eksik.
+- Shopify'ın kendi demosu (shopify-apac-ts/shopify-ucp-demo-mcp, `src/checkout.ts`) başlığın adını veriyor: `Shopify-Buyer-IP` (geçerli IPv4/IPv6), token'lı checkout çağrılarında. Demo ayrıca alıcının `User-Agent`'ını iletiyor.
+- UCP'nin `checkout.signals["dev.ucp.buyer_ip"]` alanı Shopify'da bu kontrolü karşılamıyor. Topluluk forumunda `X-Forwarded-For`, `X-Real-IP` ve `meta.buyer_ip` denenmiş, hiçbiri işe yaramamış.
+- Token kapsamları içinde checkout'a özgü bir kapsam yok, buna rağmen token kabul edildi. `limits`: katalog için saniyede 5 istek.
+
+**Uygulanan düzeltme:**
+- Token'lı checkout çağrıları artık `Shopify-Buyer-IP` ve alıcının `User-Agent`'ını gönderiyor.
+- IP kaynağı: gelen isteğin genel IP'si (`X-Forwarded-For` / `X-Real-IP`); genel değilse `.env` içindeki `UCP_BUYER_IP`. Yerel testte localhost ve Wi-Fi adresleri özel olduğu için bu değişken gerekiyor.
+- `signals` alanı yalnızca canlı şema listeliyorsa gönderiliyor.
+- Bu hata artık "token reddedildi" olarak değil, "Alıcı IP başlığı eksik" olarak gösteriliyor. Panelde IP maskeli görünüyor (`85.105.x.x`).
+- Sahte sunucu da başlık yoksa 422 döndürüyor.
+
+**Canlıya geçiş notu:**
+- Üretimde IP, Kauna'nın kendi sunucusuna gelen istekten okunmalı.
+- `X-Forwarded-For` başlığı yalnızca Kauna'nın kendi proxy/CDN katmanından geliyorsa güvenilir; aksi halde istemci bu değeri sahte gönderebilir.
+- Mobil uygulama için de aynı kural geçerli: telefonun genel IP'si Kauna API'sine gelen istekte görünür.
+
+**Tekrar çalıştırma:** `.env` içine `UCP_BUYER_IP=<curl -s https://api.ipify.org çıktısı>` ekleyip betiği yeniden çalıştırın. Sonuç: _bekleniyor_.
 

@@ -3,7 +3,10 @@
 //
 //   node --env-file=.env scripts/verify-auth-flow.mjs [--seller https://us.aabcollection.com]
 //        [--variant gid://shopify/ProductVariant/47830495854906] [--query "Green Tartan Maxi"]
-//        [--email kauna-test@example.com] [--out verify-auth-report.md]
+//        [--email kauna-test@example.com] [--buyer-ip 203.0.113.7] [--out verify-auth-report.md]
+//
+// Checkout calls carry `Shopify-Buyer-IP` (required by Shopify): --buyer-ip
+// or UCP_BUYER_IP from .env — your Mac's PUBLIC IP for local testing.
 //
 // 1. token (client_credentials) → scopes / exp / limits
 // 2. Global Catalog search                  (Bearer, catalog profile)
@@ -31,6 +34,8 @@ const VARIANT = args.variant ?? 'gid://shopify/ProductVariant/47830495854906'
 const QUERY = args.query ?? 'Green Tartan Maxi'
 const EMAIL = args.email ?? 'kauna-test@example.com'
 const OUT = args.out ?? 'verify-auth-report.md'
+const BUYER_IP = (args['buyer-ip'] ?? process.env.UCP_BUYER_IP ?? '').trim()
+const maskIp = (ip) => (ip.includes('.') ? ip.split('.').slice(0, 2).join('.') + '.x.x' : ip.split(':').slice(0, 2).join(':') + ':…')
 
 const TOKEN_URL = process.env.SHOPIFY_AUTH_URL || 'https://api.shopify.com/auth/access_token'
 const CATALOG_MCP = process.env.SHOPIFY_CATALOG_URL || 'https://catalog.shopify.com/api/ucp/mcp'
@@ -58,7 +63,7 @@ function print(s) {
 
 // ── JSON-RPC with the header rules ──────────────────────────────────────────
 let rpcId = 1
-async function rpc(endpoint, method, params, { bearer }) {
+async function rpc(endpoint, method, params, { bearer, buyerIp = false }) {
   if (method === 'tools/call' && FORBIDDEN.has(params?.name)) throw new Error(`${params.name} bu betikte çağrılmaz`)
   const headers = {
     'Content-Type': 'application/json',
@@ -67,6 +72,7 @@ async function rpc(endpoint, method, params, { bearer }) {
     'User-Agent': 'kauna-verify-auth/0.1',
   }
   if (bearer) headers.Authorization = `Bearer ${token}`
+  if (buyerIp && BUYER_IP) headers['Shopify-Buyer-IP'] = BUYER_IP
   const id = rpcId++
   const res = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', id, method, params }), signal: AbortSignal.timeout(30_000) })
   const text = await res.text()
@@ -85,7 +91,8 @@ async function rpc(endpoint, method, params, { bearer }) {
   return body.result
 }
 
-const isAuthFailure = (e) => e?.http === 401 || e?.http === 403 || /AuthenticationFailed|Unauthori[sz]ed|invalid[_ ]token/i.test(e?.message ?? '')
+const isBuyerIpError = (e) => /buyer IP header/i.test(`${e?.message ?? ''}`)
+const isAuthFailure = (e) => !isBuyerIpError(e) && e?.http === 401 || e?.http === 403 || /AuthenticationFailed|Unauthori[sz]ed|invalid[_ ]token/i.test(e?.message ?? '')
 
 /** structuredContent first, else content[0].text JSON. */
 function unwrap(result) {
@@ -133,7 +140,7 @@ async function tools(endpoint, profile, bearer) {
 }
 
 // ── run ─────────────────────────────────────────────────────────────────────
-console.log(`Kauna × Shopify — kimlik doğrulama akışı doğrulaması\nmağaza: ${SELLER} · varyant: ${VARIANT}\n`)
+console.log(`Kauna × Shopify — kimlik doğrulama akışı doğrulaması\nmağaza: ${SELLER} · varyant: ${VARIANT} · alıcı IP: ${BUYER_IP ? maskIp(BUYER_IP) : 'YOK (UCP_BUYER_IP)'}\n`)
 
 // 1. token
 const s1 = step(1, 'Token al (client_credentials)')
@@ -244,7 +251,7 @@ let checkout
 if (!cartId) s5.detail = 'sepet yok'
 else if (!token) s5.detail = 'token yok → checkout çağrılmadı (token’sız yedek yok)'
 else {
-  s5.auth = 'token (Bearer)'
+  s5.auth = `token (Bearer) + Shopify-Buyer-IP ${BUYER_IP ? maskIp(BUYER_IP) : 'YOK'}`
   try {
     const schema = merchantTools.create_checkout
     if (!schema) throw new Error('create_checkout sunulmuyor')
@@ -264,13 +271,14 @@ else {
       argsC.checkout = { line_items: [{ quantity: 1, item: { id: VARIANT } }] }
       where = 'üst düzey cart_id (şemada listelenmiyor — resmi desen)'
     }
-    const r = unwrap(await rpc(MCP, 'tools/call', { name: 'create_checkout', arguments: argsC }, { bearer: true }))
+    const r = unwrap(await rpc(MCP, 'tools/call', { name: 'create_checkout', arguments: argsC }, { bearer: true, buyerIp: true }))
     checkout = r.payload.checkout ?? r.payload
     if (!checkout.id) throw new Error(`yanıtta checkout id yok: ${JSON.stringify(r.payload).slice(0, 200)}`)
     s5.result = 'ok'
     s5.detail = `${where} · status=${checkout.status} · id=${mask6(String(checkout.id).split('/').pop())} (${r.source})${(checkout.messages ?? []).length ? ` · mesajlar: ${checkout.messages.map((m) => `${m.code}/${m.severity}`).join(',')}` : ''}`
   } catch (e) {
-    s5.result = isAuthFailure(e) ? 'AuthenticationFailed' : 'HATA'
+    s5.result = isBuyerIpError(e) ? 'ALICI IP EKSİK' : isAuthFailure(e) ? 'AuthenticationFailed' : 'HATA'
+    if (isBuyerIpError(e)) e.message += BUYER_IP ? ' (gönderilen IP reddedildi)' : ' — .env içine UCP_BUYER_IP=<genel IP> ekleyin (token kabul edildi)'
     s5.detail = e.message
   }
 }
@@ -281,10 +289,10 @@ const s6 = step(6, 'get_checkout → update_checkout (buyer.email, PUT)')
 s6.profile = CART_CHECKOUT_PROFILE
 if (!checkout?.id) s6.detail = 'checkout yok'
 else {
-  s6.auth = 'token (Bearer)'
+  s6.auth = `token (Bearer) + Shopify-Buyer-IP ${BUYER_IP ? maskIp(BUYER_IP) : 'YOK'}`
   try {
     const g = unwrap(
-      await rpc(MCP, 'tools/call', { name: 'get_checkout', arguments: { meta: metaFor(merchantTools.get_checkout, CART_CHECKOUT_PROFILE, false), id: checkout.id } }, { bearer: true }),
+      await rpc(MCP, 'tools/call', { name: 'get_checkout', arguments: { meta: metaFor(merchantTools.get_checkout, CART_CHECKOUT_PROFILE, false), id: checkout.id } }, { bearer: true, buyerIp: true }),
     )
     const cur = g.payload.checkout ?? g.payload
     const schema = merchantTools.update_checkout
@@ -305,7 +313,7 @@ else {
         MCP,
         'tools/call',
         { name: 'update_checkout', arguments: { meta: metaFor(schema, CART_CHECKOUT_PROFILE, true), id: checkout.id, checkout: body } },
-        { bearer: true },
+        { bearer: true, buyerIp: true },
       ),
     )
     checkout = r.payload.checkout ?? r.payload
@@ -314,7 +322,7 @@ else {
     s6.result = 'ok'
     s6.detail = `status=${checkout.status} · buyer.email=${checkout.buyer?.email ? maskEmail(checkout.buyer.email) : 'YANSIMADI'}${skipped.length ? ` · şemada yok, gönderilmedi: ${skipped.join(',')}` : ''}${msgs.length ? ` · mesajlar: ${msgs.join(',')}` : ''}${warn.length ? ' · ⚠ alıcı/adres eksik uyarısı' : ''}${checkout.continue_url ? ` · continue_url host=${new URL(checkout.continue_url).host}` : ''}`
   } catch (e) {
-    s6.result = isAuthFailure(e) ? 'AuthenticationFailed' : 'HATA'
+    s6.result = isBuyerIpError(e) ? 'ALICI IP EKSİK' : isAuthFailure(e) ? 'AuthenticationFailed' : 'HATA'
     s6.detail = e.message
   }
 }
@@ -326,16 +334,16 @@ s8.profile = CART_CHECKOUT_PROFILE
 if (!checkout?.id) s8.detail = 'checkout yok'
 else if (!merchantTools.cancel_checkout) s8.detail = 'cancel_checkout sunulmuyor (tools/list)'
 else {
-  s8.auth = 'token (Bearer)'
+  s8.auth = `token (Bearer) + Shopify-Buyer-IP ${BUYER_IP ? maskIp(BUYER_IP) : 'YOK'}`
   try {
     const r = unwrap(
-      await rpc(MCP, 'tools/call', { name: 'cancel_checkout', arguments: { meta: metaFor(merchantTools.cancel_checkout, CART_CHECKOUT_PROFILE, true), id: checkout.id } }, { bearer: true }),
+      await rpc(MCP, 'tools/call', { name: 'cancel_checkout', arguments: { meta: metaFor(merchantTools.cancel_checkout, CART_CHECKOUT_PROFILE, true), id: checkout.id } }, { bearer: true, buyerIp: true }),
     )
     const c = r.payload.checkout ?? r.payload
     s8.result = 'ok'
     s8.detail = `status=${c.status ?? '?'}`
   } catch (e) {
-    s8.result = isAuthFailure(e) ? 'AuthenticationFailed' : 'HATA'
+    s8.result = isBuyerIpError(e) ? 'ALICI IP EKSİK' : isAuthFailure(e) ? 'AuthenticationFailed' : 'HATA'
     s8.detail = e.message
   }
 }

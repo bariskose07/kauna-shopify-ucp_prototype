@@ -2,7 +2,7 @@
 // (rule 2), so this only has to cover buyer identity + address.
 
 const PII_KEYS =
-  /^(email|phone|phone_number|telephone|first_name|last_name|full_name|street_address|address_line[12]?|address1|address2|extended_address|postal_code|zip|access_token|client_secret|authorization)$/i
+  /^(email|phone|phone_number|telephone|first_name|last_name|full_name|street_address|address_line[12]?|address1|address2|extended_address|postal_code|zip|access_token|client_secret|authorization|dev\.ucp\.buyer_ip|buyer_ip)$/i
 
 const EMAIL = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi
 const PHONE = /\+?\d[\d\s().-]{7,}\d/g
